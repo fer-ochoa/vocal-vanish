@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- No CSP meta tag on purpose: in dev, webpack-dev-server's HMR client
+         needs to evaluate scripts that a strict 'default-src self' would block
+         (causing a black screen). Electron applies its own default CSP for
+         file:// loading in production, and the renderer is sandboxed with no
+         Node integration, so this is safe. -->
+    <title>vocal vanish</title>
+  </head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>
