@@ -19,6 +19,12 @@ export interface CatalogEntry {
   file: string;
   size: number | null;
   downloadedAt: string;
+  lyriclessFile?: string | null;
+}
+
+export interface LyriclessStatus {
+  exists: boolean;
+  file?: string;
 }
 
 export interface DownloadProgress {
@@ -48,12 +54,12 @@ const api = {
    * loading file:// URLs directly (blocked for HTTP-origin pages in dev) and
    * custom protocol sources (blocked by the default CSP).
    */
-  openMediaStream(kid: string): Promise<ArrayBuffer> {
+  openMediaStream(kid: string, variant?: 'original' | 'lyricless'): Promise<ArrayBuffer> {
     const channel = 'kara:media-data';
     return new Promise((resolve, reject) => {
       const chunks: Uint8Array[] = [];
       let total = 0;
-      ipcRenderer.send('kara:media-stream', kid);
+      ipcRenderer.send('kara:media-stream', kid, variant);
 
       const onData = (_e: unknown, msg: any): void => {
         if (msg && msg.ok === false) {
@@ -87,6 +93,17 @@ const api = {
   },
   delete(kid: string): Promise<boolean> {
     return ipcRenderer.invoke('kara:delete', kid);
+  },
+  /**
+   * Write a lyricless video to the catalog. The renderer performs all DSP
+   * (stem separation + re-muxing) and sends the final MP4 bytes here.
+   */
+  writeLyricless(kid: string, data: ArrayBuffer): Promise<CatalogEntry> {
+    return ipcRenderer.invoke('kara:write-lyricless', kid, data);
+  },
+  /** Check whether a lyricless variant exists for a song. */
+  lyriclessStatus(kid: string): Promise<LyriclessStatus> {
+    return ipcRenderer.invoke('kara:lyricless-status', kid);
   },
   onDownloadProgress(callback: (p: DownloadProgress) => void): () => void {
     const listener = (_e: unknown, p: DownloadProgress): void => callback(p);

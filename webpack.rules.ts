@@ -15,6 +15,9 @@ export const rules: Required<ModuleOptions>['rules'] = [
     test: /native_modules[/\\].+\.node$/,
     use: 'node-loader',
   },
+  // Native modules (including onnxruntime-web) are relocated to the
+  // native_modules/ output directory. ORT's wasm sidecar paths are handled
+  // at runtime via env.wasm.wasmPaths (see src/lyricless/stems.ts).
   {
     test: /[/\\]node_modules[/\\].+\.(m?js|node)$/,
     parser: { amd: false },
