@@ -14,7 +14,7 @@ declare const MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
 if (require("electron-squirrel-startup")) {
   app.quit();
 }
-
+//app.commandLine.appendSwitch("enable-unsafe-webgpu");
 // ---------------------------------------------------------------------------
 // Kara moe API client (main process only — the renderer never touches the
 // network directly, following Electron security best practices).
@@ -335,8 +335,7 @@ function registerIpc(): void {
       });
       return;
     }
-    const fileName =
-      variant === "lyricless" ? entry.lyriclessFile : entry.file;
+    const fileName = variant === "lyricless" ? entry.lyriclessFile : entry.file;
     if (!fileName) {
       e.reply("kara:media-data", {
         ok: false,
@@ -429,6 +428,50 @@ function registerIpc(): void {
     }
     return { exists: false };
   });
+
+  // Check whether the htdemucs model is cached locally. The renderer calls
+  // this before loading the separator; if the file exists, it creates a blob:
+  // URL and passes it as `modelUrl` to unblend (skipping the ~91 MB download).
+  ipcMain.handle("kara:model-status", async () => {
+    const modelPath = path.join(app.getPath("userData"), "htdemucs_fp16.onnx");
+    if (!fs.existsSync(modelPath)) return { cached: false };
+    const stat = fs.statSync(modelPath);
+    return { cached: true, size: stat.size };
+  });
+
+  // Stream the cached model file to the renderer (same chunked pattern as
+  // kara:media-stream). The renderer wraps it in a Blob + object URL.
+  ipcMain.on("kara:model-stream", (e) => {
+    const modelPath = path.join(app.getPath("userData"), "htdemucs_fp16.onnx");
+    if (!fs.existsSync(modelPath)) {
+      e.reply("kara:model-data", {
+        ok: false,
+        error: "Model file not found.",
+      });
+      return;
+    }
+    const stream = fs.createReadStream(modelPath);
+    stream.on("data", (chunk: Buffer) =>
+      e.sender.send("kara:model-data", { chunk }),
+    );
+    stream.on("error", (err: Error) =>
+      e.reply("kara:model-data", { ok: false, error: err.message }),
+    );
+    stream.on("end", () => e.reply("kara:model-data", { ok: true }));
+  });
+
+  // Save the model file to disk after the renderer downloads it from
+  // HuggingFace. Subsequent runs load from cache instead of re-downloading.
+  ipcMain.handle(
+    "kara:save-model",
+    async (_e, data: ArrayBuffer): Promise<void> => {
+      const modelPath = path.join(
+        app.getPath("userData"),
+        "htdemucs_fp16.onnx",
+      );
+      fs.writeFileSync(modelPath, Buffer.from(data));
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -457,7 +500,7 @@ function applyCsp(): void {
     "img-src 'self' data: blob:",
     "media-src 'self' blob: file:",
     "font-src 'self' data:",
-    "connect-src 'self' blob: https://kara.moe https://huggingface.co",
+    "connect-src 'self' blob: https://kara.moe https://huggingface.co https://*.hf.co https://*.huggingface.co",
   ].join("; ");
 
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
@@ -465,6 +508,8 @@ function applyCsp(): void {
       responseHeaders: {
         ...details.responseHeaders,
         "Content-Security-Policy": [csp],
+        "Cross-Origin-Opener-Policy": ["same-origin"],
+        "Cross-Origin-Embedder-Policy": ["require-corp"],
       },
     });
   });

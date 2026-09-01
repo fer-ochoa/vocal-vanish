@@ -105,6 +105,51 @@ const api = {
   lyriclessStatus(kid: string): Promise<LyriclessStatus> {
     return ipcRenderer.invoke('kara:lyricless-status', kid);
   },
+  /** Check whether the htdemucs model is cached locally. */
+  modelStatus(): Promise<{ cached: boolean; size?: number }> {
+    return ipcRenderer.invoke('kara:model-status');
+  },
+  /** Stream the cached model file to the renderer (returns ArrayBuffer). */
+  openModelStream(): Promise<ArrayBuffer> {
+    const channel = 'kara:model-data';
+    return new Promise((resolve, reject) => {
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      ipcRenderer.send('kara:model-stream');
+      const onData = (_e: unknown, msg: any): void => {
+        if (msg && msg.ok === false) {
+          cleanup();
+          reject(new Error(msg.error || 'Failed to stream model.'));
+          return;
+        }
+        if (msg && msg.chunk) {
+          const u8 = new Uint8Array(msg.chunk);
+          chunks.push(u8);
+          total += u8.length;
+          return;
+        }
+        if (msg && msg.ok === true) {
+          cleanup();
+          const buf = new ArrayBuffer(total);
+          const view = new Uint8Array(buf);
+          let offset = 0;
+          for (const c of chunks) {
+            view.set(c, offset);
+            offset += c.length;
+          }
+          resolve(buf);
+        }
+      };
+      const cleanup = (): void => {
+        ipcRenderer.removeListener(channel, onData);
+      };
+      ipcRenderer.on(channel, onData);
+    });
+  },
+  /** Save the model file to disk (called after first download). */
+  saveModel(data: ArrayBuffer): Promise<void> {
+    return ipcRenderer.invoke('kara:save-model', data);
+  },
   onDownloadProgress(callback: (p: DownloadProgress) => void): () => void {
     const listener = (_e: unknown, p: DownloadProgress): void => callback(p);
     ipcRenderer.on('kara:download-progress', listener);

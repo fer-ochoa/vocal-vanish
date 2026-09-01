@@ -11,6 +11,7 @@ import {
   Input,
   Output,
   Conversion,
+  MP4,
   Mp4OutputFormat,
   BufferTarget,
   BlobSource,
@@ -67,7 +68,21 @@ export async function generateLyricless(
   // -----------------------------------------------------------------------
   const resampled = await resampleTo44100(decodedBuffer);
 
-  onProgress?.({ stage: 'separate', fraction: 0, label: 'Separating stems…' });
+  // Ensure the model is cached locally (first run downloads ~91 MB from
+  // HuggingFace; subsequent runs load from disk).
+  onProgress?.({ stage: 'separate', fraction: 0, label: 'Checking model…' });
+  const status = await window.kara.modelStatus();
+  if (!status.cached) {
+    onProgress?.({ stage: 'separate', fraction: 0.05, label: 'Downloading model (first run)…' });
+    const MODEL_URL =
+      'https://huggingface.co/Ryan5453/unblend/resolve/eda32466a76dc81c5e66af6577dbc20fb219e959/htdemucs_fp16.onnx';
+    const resp = await fetch(MODEL_URL);
+    if (!resp.ok) throw new Error(`Model download failed: HTTP ${resp.status}`);
+    const modelBytes = await resp.arrayBuffer();
+    await window.kara.saveModel(modelBytes);
+  }
+
+  onProgress?.({ stage: 'separate', fraction: 0.1, label: 'Separating stems…' });
 
   const { interleaved, numSamples, separator } = await separateAndRecombine(
     resampled,
@@ -82,62 +97,84 @@ export async function generateLyricless(
 
   // -----------------------------------------------------------------------
   // Stage 3: Re-mux — copy video packets + AAC-encode the new audio.
+  // Two composable conversions target the same Output: one copies the video
+  // track from the original, the other drives an AudioSampleSource with our
+  // recombined stems. The caller starts and finalizes the output.
   // -----------------------------------------------------------------------
   onProgress?.({ stage: 'mux', fraction: 0, label: 'Re-muxing…' });
 
-  const muxInput = new Input({ source: new BlobSource(blob) });
   const muxOutput = new Output({
     format: new Mp4OutputFormat(),
     target: new BufferTarget(),
   });
 
-  // Composable conversion: video is copied (no transcode — mediabunny detects
-  // that the source codec matches and copies packets directly), audio from the
-  // source is discarded. We then feed our recombined stems via AudioSampleSource.
-  const muxConversion = await Conversion.init({
-    input: muxInput,
+  // --- 3a: Video track — copy packets from the original --------------------
+  const videoInput = new Input({ source: new BlobSource(blob), formats: [MP4] });
+  const videoConversion = await Conversion.init({
+    input: videoInput,
     output: muxOutput,
     composable: true,
-    video: {},
+    video: {}, // no codec → packet copy
     audio: { discard: true },
   });
 
-  // For composable conversions, the caller must start the output before the
-  // first execute().
+  // --- 3b: Audio track — encode our recombined stems as Opus ---------------
+  // WebCodecs AAC encoders are unreliable across Chromium/Electron builds
+  // (often missing or limited to specific configurations). Opus is universally
+  // supported by WebCodecs and produces excellent quality at lower bitrates.
+  const audioSource = new AudioSampleSource({
+    codec: 'opus',
+    quality: new Quality({ bitrate: 128000 }),
+  });
+  muxOutput.addAudioTrack(audioSource);
+
+  // Start the output (required before feeding samples in composable mode).
   await muxOutput.start();
 
-  // Create an AAC audio source for our recombined stems.
-  const audioSource = new AudioSampleSource({
-    codec: 'aac',
-    quality: new Quality('high'),
-  });
-
-  // Feed the interleaved stereo data into the audio source in ~1-second chunks.
-  // We build a temporary AudioBuffer per chunk and use AudioSample.fromAudioBuffer.
-  const chunkFrames = 44100; // ~1 second
-  for (let i = 0; i < numSamples; i += chunkFrames) {
-    const end = Math.min(i + chunkFrames, numSamples);
-    const frames = end - i;
-
-    // Build a 2-channel AudioBuffer from the interleaved data.
-    const ctx = new OfflineAudioContext(2, frames, 44100);
-    const chunkBuf = ctx.createBuffer(2, frames, 44100);
-    const left = chunkBuf.getChannelData(0);
-    const right = chunkBuf.getChannelData(1);
-    for (let j = 0; j < frames; j++) {
-      left[j] = interleaved[(i + j) * 2];
-      right[j] = interleaved[(i + j) * 2 + 1];
-    }
-
-    const samples = AudioSample.fromAudioBuffer(chunkBuf, i / 44100);
-    for (const sample of samples) {
-      await audioSource.add(sample);
+  // Resample from 44.1 kHz to 48 kHz using OfflineAudioContext.
+  const totalFrames48 = Math.ceil((numSamples / 44100) * 48000);
+  const resampleCtx = new OfflineAudioContext(2, totalFrames48, 48000);
+  const srcBuf = resampleCtx.createBuffer(2, numSamples, 44100);
+  {
+    const l = srcBuf.getChannelData(0);
+    const r = srcBuf.getChannelData(1);
+    for (let i = 0; i < numSamples; i++) {
+      l[i] = interleaved[i * 2];
+      r[i] = interleaved[i * 2 + 1];
     }
   }
+  const srcNode = resampleCtx.createBufferSource();
+  srcNode.buffer = srcBuf;
+  srcNode.connect(resampleCtx.destination);
+  srcNode.start(0);
+  const resampled48 = await resampleCtx.startRendering();
 
-  // Run the conversion to completion. Video packets are copied from the source;
-  // the new audio is encoded as AAC by mediabunny's internal WebCodecs encoder.
-  muxConversion.onProgress = (fraction: number) => {
+  // Feed the 48 kHz stereo data in ~1-second chunks.
+  const chunkFrames = 48000;
+  const leftCh = resampled48.getChannelData(0);
+  const rightCh = resampled48.getChannelData(1);
+  for (let i = 0; i < totalFrames48; i += chunkFrames) {
+    const end = Math.min(i + chunkFrames, totalFrames48);
+    const frames = end - i;
+
+    const chunkBuf = new AudioBuffer({
+      length: frames,
+      sampleRate: 48000,
+      numberOfChannels: 2,
+    });
+    chunkBuf.getChannelData(0).set(leftCh.subarray(i, end));
+    chunkBuf.getChannelData(1).set(rightCh.subarray(i, end));
+
+    const samples = AudioSample.fromAudioBuffer(chunkBuf, i / 48000);
+    for (const sample of samples) {
+      await audioSource.add(sample);
+      sample.close();
+    }
+  }
+  audioSource.close(); // Signal no more samples will come.
+
+  // Run the video conversion to completion (copies packets from source).
+  videoConversion.onProgress = (fraction: number) => {
     onProgress?.({
       stage: 'mux',
       fraction,
@@ -145,7 +182,7 @@ export async function generateLyricless(
     });
   };
 
-  await muxConversion.execute();
+  await videoConversion.execute();
 
   // Finalize the output to get the complete MP4 buffer.
   await muxOutput.finalize();

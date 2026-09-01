@@ -6,7 +6,7 @@
  * back into a single interleaved-stereo Float32Array.
  */
 
-import { Separator } from 'unblend';
+import { Separator } from "unblend";
 
 /** Progress callback for the stem separation stage. */
 export interface StemProgress {
@@ -73,24 +73,40 @@ export async function separateAndRecombine(
   numSamples: number;
   separator: Separator;
 }> {
-  // ORT's wasm sidecars (.wasm files) are emitted by the asset relocator
-  // alongside the onnxruntime-web bundle. We pass an explicit wasmPaths URL
-  // so ORT can find them regardless of how the bundler resolved import.meta.url.
-  const ortWasmUrl = new URL(
-    'ort-wasm-simd-threaded.jsep.wasm',
-    document.baseURI,
-  ).href;
+  // ORT's wasm sidecars are copied to main_window/ort/ by CopyWebpackPlugin
+  // (see webpack.renderer.config.ts). We pass the directory URL as wasmPaths —
+  // ORT's internal Sf() does `new URL(filename, wasmPaths)` so it must be a
+  // base directory, not a file URL. The page is served from /main_window/,
+  // so 'ort/' resolves correctly relative to document.baseURI.
+  const ortWasmDir = new URL("ort/", document.baseURI).href;
 
-  const separator = await Separator.load('htdemucs', {
-    precision: 'fp16',
-    backend: 'webgpu',
-    wasmPaths: ortWasmUrl,
+  // Check if the model is cached locally (avoids re-downloading ~91 MB).
+  let modelUrl: string | undefined;
+  const status = await window.kara.modelStatus();
+  if (status.cached) {
+    const buf = await window.kara.openModelStream();
+    modelUrl = URL.createObjectURL(
+      new Blob([buf], { type: "application/octet-stream" }),
+    );
+  }
+
+  const separator = await Separator.load("htdemucs", {
+    precision: "fp16",
+    backend: "webgpu",
+    wasmPaths: ortWasmDir,
+    // Single-threaded WASM: cross-origin isolation isn't enabled in this app,
+    // so multi-threaded WebAssembly would fail. 1 thread avoids the warning.
+    numThreads: 4,
+    ...(modelUrl ? { modelUrl } : {}),
   });
+
+  // If we used a blob URL for the model, revoke it after loading.
+  if (modelUrl) URL.revokeObjectURL(modelUrl);
 
   try {
     const result = await separator.separate(audio, {
       onProgress: (p) => {
-        if (onProgress && p.stage === 'completed') {
+        if (onProgress && p.stage === "completed") {
           // p is { stage, segIdx, totalSegs, fraction }
           onProgress({
             fraction: p.fraction ?? 0,
@@ -103,9 +119,9 @@ export async function separateAndRecombine(
 
     const stems = result.stems;
     // htdemucs produces: drums, bass, other, vocals (all interleaved stereo).
-    const nonVocalKeys = ['drums', 'bass', 'other'].filter((k) => k in stems);
+    const nonVocalKeys = ["drums", "bass", "other"].filter((k) => k in stems);
     if (nonVocalKeys.length === 0) {
-      throw new Error('Stem separation produced no usable stems.');
+      throw new Error("Stem separation produced no usable stems.");
     }
 
     // All stems are interleaved stereo: [L0, R0, L1, R1, ...]
