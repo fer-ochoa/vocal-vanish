@@ -16,10 +16,16 @@ if (require("electron-squirrel-startup")) {
 }
 
 app.commandLine.appendSwitch("enable-unsafe-webgpu");
+// app.commandLine.appendSwitch("enable-field-trial-config");
+// app.commandLine.appendSwitch(
+//   "force-fieldtrial-params",
+//   "WebGPU.Enabled:UnsafeFeatures/shader-f16",
+// );
+app.commandLine.appendSwitch("enable-features", "Vulkan");
 
-app.commandLine.appendSwitch("enable-features", "ForceEnableWebGpuInterop");
+//app.commandLine.appendSwitch("enable-dawn-features", "allow_unsafe_apis");
 
-//app.commandLine.appendSwitch("force_high_performance_gpu");
+app.commandLine.appendSwitch("force_high_performance_gpu");
 
 // ---------------------------------------------------------------------------
 // Kara moe API client (main process only — the renderer never touches the
@@ -435,11 +441,12 @@ function registerIpc(): void {
     return { exists: false };
   });
 
-  // Check whether the htdemucs model is cached locally. The renderer calls
+  // Check whether a separation model is cached locally. The renderer calls
   // this before loading the separator; if the file exists, it creates a blob:
-  // URL and passes it as `modelUrl` to unblend (skipping the ~91 MB download).
-  ipcMain.handle("kara:model-status", async () => {
-    const modelPath = path.join(app.getPath("userData"), "htdemucs_fp16.onnx");
+  // URL and passes it as `modelUrl` to unblend (skipping the first-run download).
+  ipcMain.handle("kara:model-status", async (_e, modelId?: string) => {
+    const name = `${modelId || "htdemucs"}_fp16.onnx`;
+    const modelPath = path.join(app.getPath("userData"), name);
     if (!fs.existsSync(modelPath)) return { cached: false };
     const stat = fs.statSync(modelPath);
     return { cached: true, size: stat.size };
@@ -447,8 +454,9 @@ function registerIpc(): void {
 
   // Stream the cached model file to the renderer (same chunked pattern as
   // kara:media-stream). The renderer wraps it in a Blob + object URL.
-  ipcMain.on("kara:model-stream", (e) => {
-    const modelPath = path.join(app.getPath("userData"), "htdemucs_fp16.onnx");
+  ipcMain.on("kara:model-stream", (e, modelId?: string) => {
+    const name = `${modelId || "htdemucs"}_fp16.onnx`;
+    const modelPath = path.join(app.getPath("userData"), name);
     if (!fs.existsSync(modelPath)) {
       e.reply("kara:model-data", {
         ok: false,
@@ -470,12 +478,47 @@ function registerIpc(): void {
   // HuggingFace. Subsequent runs load from cache instead of re-downloading.
   ipcMain.handle(
     "kara:save-model",
-    async (_e, data: ArrayBuffer): Promise<void> => {
-      const modelPath = path.join(
-        app.getPath("userData"),
-        "htdemucs_fp16.onnx",
-      );
+    async (
+      _e,
+      modelId: string | undefined,
+      data: ArrayBuffer,
+    ): Promise<void> => {
+      const name = `${modelId || "htdemucs"}_fp16.onnx`;
+      const modelPath = path.join(app.getPath("userData"), name);
       fs.writeFileSync(modelPath, Buffer.from(data));
+    },
+  );
+
+  // -----------------------------------------------------------------------
+  // Settings (settings.json in userData). Currently holds the selected
+  // separation model; kept as a flat JSON object so future settings slot in.
+  // -----------------------------------------------------------------------
+  interface AppSettings {
+    separationModel?: string;
+  }
+
+  const SETTINGS_FILE = (): string =>
+    path.join(app.getPath("userData"), "settings.json");
+
+  function readSettings(): AppSettings {
+    try {
+      return JSON.parse(
+        fs.readFileSync(SETTINGS_FILE(), "utf8"),
+      ) as AppSettings;
+    } catch {
+      return {};
+    }
+  }
+
+  ipcMain.handle("kara:settings-get", async () => readSettings());
+
+  ipcMain.handle(
+    "kara:settings-set",
+    async (_e, patch: Partial<AppSettings>): Promise<AppSettings> => {
+      const settings = { ...readSettings(), ...(patch || {}) };
+      fs.mkdirSync(path.dirname(SETTINGS_FILE()), { recursive: true });
+      fs.writeFileSync(SETTINGS_FILE(), JSON.stringify(settings, null, 2));
+      return settings;
     },
   );
 }

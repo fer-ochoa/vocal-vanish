@@ -105,17 +105,17 @@ const api = {
   lyriclessStatus(kid: string): Promise<LyriclessStatus> {
     return ipcRenderer.invoke('kara:lyricless-status', kid);
   },
-  /** Check whether the htdemucs model is cached locally. */
-  modelStatus(): Promise<{ cached: boolean; size?: number }> {
-    return ipcRenderer.invoke('kara:model-status');
+  /** Check whether a separation model (fp16) is cached locally. */
+  modelStatus(modelId?: string): Promise<{ cached: boolean; size?: number }> {
+    return ipcRenderer.invoke('kara:model-status', modelId);
   },
   /** Stream the cached model file to the renderer (returns ArrayBuffer). */
-  openModelStream(): Promise<ArrayBuffer> {
+  openModelStream(modelId?: string): Promise<ArrayBuffer> {
     const channel = 'kara:model-data';
     return new Promise((resolve, reject) => {
       const chunks: Uint8Array[] = [];
       let total = 0;
-      ipcRenderer.send('kara:model-stream');
+      ipcRenderer.send('kara:model-stream', modelId);
       const onData = (_e: unknown, msg: any): void => {
         if (msg && msg.ok === false) {
           cleanup();
@@ -147,8 +147,16 @@ const api = {
     });
   },
   /** Save the model file to disk (called after first download). */
-  saveModel(data: ArrayBuffer): Promise<void> {
-    return ipcRenderer.invoke('kara:save-model', data);
+  saveModel(modelId: string, data: ArrayBuffer): Promise<void> {
+    return ipcRenderer.invoke('kara:save-model', modelId, data);
+  },
+  /** Read persisted settings (settings.json in userData). */
+  getSettings(): Promise<{ separationModel?: string }> {
+    return ipcRenderer.invoke('kara:settings-get');
+  },
+  /** Merge a patch into persisted settings; returns the new settings. */
+  setSettings(patch: { separationModel?: string }): Promise<{ separationModel?: string }> {
+    return ipcRenderer.invoke('kara:settings-set', patch);
   },
   onDownloadProgress(callback: (p: DownloadProgress) => void): () => void {
     const listener = (_e: unknown, p: DownloadProgress): void => callback(p);

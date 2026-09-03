@@ -6,13 +6,14 @@ This document is a complete, self-contained description of how this project is b
 
 ## 1. What the app does
 
-A desktop client for the **Kara moe API** (anime karaoke videos with hardcoded subtitles). Three screens:
+A desktop client for the **Kara moe API** (anime karaoke videos with hardcoded subtitles). Four screens:
 
 1. **Search** — query the Kara moe database, show paginated results, download a song's hardsubbed video.
-2. **Catalog** — list locally downloaded songs (title, series, singer, duration), filter, play, delete.
-3. **Player** — play a downloaded video with video.js (subtitles are burned in, so no separate track is needed).
+2. **Catalog** — list locally downloaded songs (title, series, singer, duration), filter, play, delete, generate lyricless versions.
+3. **Player** — play a downloaded video with video.js (subtitles are burned in, so no separate track is needed); Original / Lyricless tabs.
+4. **Config** — pick the stem-separation model used by *Lyricless* and show whether processing runs on WebGPU or the CPU WASM fallback.
 
-The app is a **proof of concept**: simple, minimal UI, no auth, no settings screen.
+The app is a **proof of concept**: simple, minimal UI, no auth. The only persisted settings are in `userData/settings.json` (currently just the selected separation model).
 
 ---
 
@@ -136,8 +137,14 @@ This file owns everything privileged. Major sections:
 | `kara:search` | `handle` (invoke) | Params `{ query, from, size, mode? }`. `mode`: `text`→`filter`, `year`→`q=y:`, `kid`→`q=k:`. Returns `{ count, rows: SearchRow[] }`. |
 | `kara:catalog` | `handle` | Returns all `CatalogEntry[]`, sorted by `downloadedAt` desc. |
 | `kara:download` | `handle` | Params `kid`. Fetches song detail, downloads `hardsubbed_mediafile` to `<dir>/<name>.mp4` (via a `.part` temp file, then atomic `rename`), sends `kara:download-progress` events during transfer, writes the catalog index, returns the new `CatalogEntry`. |
-| `kara:media-stream` | `on` (send) | Params `kid`. Pipes the local video file to the renderer as `kara:media-data` messages (see §6). |
-| `kara:delete` | `handle` | Params `kid`. Deletes the video file + index entry. |
+| `kara:media-stream` | `on` (send) | Params `kid`, optional `variant` (`'lyricless'`). Pipes the local video file to the renderer as `kara:media-data` messages (see §6). |
+| `kara:delete` | `handle` | Params `kid`. Deletes the video file + lyricless variant + index entry. |
+| `kara:write-lyricless` | `handle` | Params `kid`, `ArrayBuffer`. Atomic write of `<kid>.lyricless.mp4` + index update (see docs/lyricless-implementation.md). |
+| `kara:lyricless-status` | `handle` | Params `kid` → `{ exists, file? }`. |
+| `kara:model-status` | `handle` | Params optional `modelId` → `{ cached, size? }` for `<modelId>_fp16.onnx` in userData. |
+| `kara:model-stream` | `on` (send) | Params optional `modelId`. Streams the cached model file as `kara:model-data` chunks. |
+| `kara:save-model` | `handle` | Params `modelId`, `ArrayBuffer`. Writes `<modelId>_fp16.onnx` to userData. |
+| `kara:settings-get` / `kara:settings-set` | `handle` | Read/merge-patch `settings.json` in userData (currently holds `separationModel`). |
 
 **Download progress events:** main sends `sender.send('kara:download-progress', { kid, received, total })` as bytes arrive; the renderer listens and updates the overlay.
 
@@ -171,8 +178,12 @@ Exposes `window.kara` with these methods (the **complete** renderer API surface)
 | `search({query, from, size, mode?})` | `Promise<{count, rows: SearchRow[]}>` | invoke `kara:search` |
 | `catalog()` | `Promise<CatalogEntry[]>` | invoke `kara:catalog` |
 | `download(kid)` | `Promise<CatalogEntry>` | invoke `kara:download` (resolves when fully downloaded) |
-| `openMediaStream(kid)` | `Promise<ArrayBuffer>` | **see below** |
+| `openMediaStream(kid, variant?)` | `Promise<ArrayBuffer>` | **see below** |
 | `delete(kid)` | `Promise<boolean>` | invoke `kara:delete` |
+| `writeLyricless(kid, buf)` | `Promise<CatalogEntry>` | invoke `kara:write-lyricless` |
+| `lyriclessStatus(kid)` | `Promise<{exists, file?}>` | invoke `kara:lyricless-status` |
+| `modelStatus(modelId?)` / `openModelStream(modelId?)` / `saveModel(modelId, buf)` | — | per-model ONNX cache (see docs/lyricless-implementation.md) |
+| `getSettings()` / `setSettings(patch)` | `Promise<{separationModel?}>` | read/merge-patch `settings.json` |
 | `onDownloadProgress(cb)` | `() => void` (unsubscribe) | listens to `kara:download-progress` |
 
 ### How video playback works (the important part)
@@ -205,16 +216,18 @@ Both are handled in `applyCsp()`. **Do not** put a CSP `<meta>` tag in `index.ht
 
 ### Entry and routing
 - `src/renderer.ts` — `createApp(App).use(router).mount('#app')`, imports `./styles.css`.
-- `src/router.ts` — hash history, three routes:
+- `src/router.ts` — hash history, four routes:
   - `/` → `SearchView`
   - `/catalog` → `CatalogView`
   - `/player/:kid` → `PlayerView` (props: true)
+  - `/config` → `ConfigView`
 
 ### Components
-- **`src/App.vue`** — shell: fixed left sidebar (brand + nav links to Search/Catalog) and a `<router-view>` content area.
+- **`src/App.vue`** — shell: fixed left sidebar (brand + nav links to Search/Catalog/Config) and a `<router-view>` content area.
 - **`src/views/SearchView.vue`** — search bar (input + criteria `<select>`), paginated result list, per-row *Download* button, full-screen download progress overlay, error toast. Page size = 25. Criteria map to `mode`: `text`/`year`/`kid`.
-- **`src/views/CatalogView.vue`** — local filter input + list of catalog entries (title, series, singer, duration) with *Play* (routes to player) and delete buttons.
+- **`src/views/CatalogView.vue`** — local filter input + list of catalog entries (title, series, singer, duration) with *Play* (routes to player), *Lyricless* and delete buttons.
 - **`src/views/PlayerView.vue`** — resolves the entry's title from `catalog()`, calls `openMediaStream(kid)` → Blob → object URL → video.js. Disposes the player and revokes the URL on unmount.
+- **`src/views/ConfigView.vue`** — separation-model dropdown (persisted via `getSettings`/`setSettings`) + WebGPU/WASM backend badge from a renderer-side `navigator.gpu` probe.
 
 ### Styling
 - `src/styles.css` — plain CSS, dark theme via CSS variables (`--bg`, `--panel`, `--accent`, ...). No UI framework; keep it minimal.
@@ -272,10 +285,15 @@ vocal-vanish/
 │  ├─ styles.css             # dark theme, plain CSS
 │  ├─ shims-vue.d.ts         # *.vue + vue-router type shims
 │  ├─ global.d.ts            # window.kara typing
+│  ├─ lyricless/
+│  │  ├─ pipeline.ts         # decode → separate → re-mux orchestration
+│  │  ├─ stems.ts            # audio decode/resample, unblend separation + mixing
+│  │  └─ models.ts           # separation-model catalog (Config dropdown data)
 │  └─ views/
 │     ├─ SearchView.vue      # search + download
-│     ├─ CatalogView.vue     # local catalog list
-│     └─ PlayerView.vue      # video.js player
+│     ├─ CatalogView.vue     # local catalog list + lyricless button
+│     ├─ PlayerView.vue      # video.js player, Original/Lyricless tabs
+│     └─ ConfigView.vue      # model picker + WebGPU/WASM status
 ├─ docs/implementation.md    # this file
 └─ README.md
 ```

@@ -6,7 +6,8 @@
  * back into a single interleaved-stereo Float32Array.
  */
 
-import { Separator } from "unblend";
+import { Separator, MODEL_CONFIGS } from "unblend";
+import type { ModelType } from "unblend";
 
 /** Progress callback for the stem separation stage. */
 export interface StemProgress {
@@ -16,6 +17,66 @@ export interface StemProgress {
   segIdx: number;
   /** Total number of segments. */
   totalSegs: number;
+}
+
+/** Cached result of the WebGPU f16 capability probe (avoids re-probing). */
+let webgpuF16Cache: boolean | null = null;
+
+/**
+ * Probe whether the GPU supports the `shader-f16` WebGPU feature, which is
+ * required for ORT to run fp16 ONNX tensors on the WebGPU backend.
+ *
+ * ORT's WebGPU EP generates WGSL shaders with `f16` types for fp16 tensors
+ * but only adds the `enable f16;` directive when this feature is available.
+ * Without it, shader compilation fails silently and every subsequent GPU
+ * operation cascades into "invalid due to a previous error" validation
+ * errors — producing silent no-audio output.
+ *
+ * @returns true if WebGPU + shader-f16 are both available; false otherwise.
+ */
+export async function detectWebGpuF16(): Promise<boolean> {
+  if (webgpuF16Cache !== null) return webgpuF16Cache;
+  try {
+    const nav = navigator as Navigator & { gpu?: GPU };
+    const gpu = nav.gpu;
+
+    const adapter_ = await navigator.gpu?.requestAdapter();
+
+    console.log("=== FEATURES ===");
+    console.log([...adapter_?.features]);
+
+    console.log("=== INFO ===");
+    console.log(adapter_?.info);
+
+    console.log("=== LIMITS ===");
+    console.log({
+      maxBufferSize: adapter_?.limits.maxBufferSize,
+      maxStorageBufferBindingSize: adapter_?.limits.maxStorageBufferBindingSize,
+    });
+
+    const device = await adapter_?.requestDevice({
+      requiredFeatures: ["shader-f16"],
+    });
+    console.log("=== DEVICE FEATURES ===");
+    console.log(device);
+
+    if (!gpu) {
+      webgpuF16Cache = false;
+      return false;
+    }
+    const adapter = await gpu.requestAdapter();
+    if (!adapter) {
+      webgpuF16Cache = false;
+      return false;
+    }
+    // Check for the shader-f16 feature on the adapter. This is what ORT
+    // checks internally (device.features.has("shader-f16")) before adding
+    // `enable f16;` to WGSL shaders.
+    webgpuF16Cache = adapter.features.has("shader-f16");
+  } catch {
+    webgpuF16Cache = false;
+  }
+  return webgpuF16Cache;
 }
 
 /**
@@ -58,16 +119,20 @@ export async function resampleTo44100(
 
 /**
  * Separate an AudioBuffer into stems and recombine all non-vocal stems
- * (drums + bass + other) into a single interleaved-stereo Float32Array.
+ * (drums + bass + other, or the model's "other" complement stem) into a
+ * single interleaved-stereo Float32Array.
  *
  * @param audio  A 44.1 kHz, 1–2 channel AudioBuffer.
  * @param onProgress  Optional callback for per-segment progress.
+ * @param model  The unblend model id (from the Config screen). Defaults to
+ *               htdemucs.
  * @returns An object with the recombined stem data and the separator
  *          (call `separator.unload()` when done to free GPU/CPU resources).
  */
 export async function separateAndRecombine(
   audio: AudioBuffer,
   onProgress?: (p: StemProgress) => void,
+  model: ModelType = "htdemucs",
 ): Promise<{
   interleaved: Float32Array;
   numSamples: number;
@@ -80,22 +145,50 @@ export async function separateAndRecombine(
   // so 'ort/' resolves correctly relative to document.baseURI.
   const ortWasmDir = new URL("ort/", document.baseURI).href;
 
-  // Check if the model is cached locally (avoids re-downloading ~91 MB).
+  // Check if the model is cached locally (avoids re-downloading on first run).
   let modelUrl: string | undefined;
-  const status = await window.kara.modelStatus();
+  const status = await window.kara.modelStatus(model);
   if (status.cached) {
-    const buf = await window.kara.openModelStream();
+    const buf = await window.kara.openModelStream(model);
     modelUrl = URL.createObjectURL(
       new Blob([buf], { type: "application/octet-stream" }),
     );
   }
 
-  const separator = await Separator.load("htdemucs", {
+  // Determine the backend. WebGPU is preferred, but fp16 ONNX tensors require
+  // the GPU's `shader-f16` feature for ORT to compile WGSL shaders with f16
+  // types. Without it, every pipeline creation fails and inference produces
+  // silent garbage (no-audio output). Fall back to WASM when f16 is missing —
+  // except for models that unblend refuses to run on WASM (webgpuRequired),
+  // which get a clear error instead of a guaranteed crash.
+  const config = MODEL_CONFIGS[model];
+  let backend: "webgpu" | "wasm" = "webgpu";
+  if (config.webgpuRequired) {
+    const hasF16 = await detectWebGpuF16();
+    if (!hasF16) {
+      throw new Error(
+        `${model} requires WebGPU with the shader-f16 feature, but this GPU ` +
+          "does not support it. The model uses fp16 weights that cannot be " +
+          "compiled to WGSL without f16 support. Try a different model or a " +
+          "GPU with shader-f16 support.",
+      );
+    }
+  } else {
+    // Non-required models: prefer WebGPU, but fall back to WASM if the GPU
+    // can't handle fp16 shaders. This prevents the silent no-audio failure.
+    const hasF16 = await detectWebGpuF16();
+    if (!hasF16) {
+      backend = "wasm";
+    }
+  }
+
+  const separator = await Separator.load(model, {
     precision: "fp16",
-    backend: "webgpu",
+    backend,
     wasmPaths: ortWasmDir,
-    // Single-threaded WASM: cross-origin isolation isn't enabled in this app,
-    // so multi-threaded WebAssembly would fail. 1 thread avoids the warning.
+    // numThreads only applies to the WASM backend (unblend ignores it for
+    // WebGPU). Cross-origin isolation isn't enabled in this app, so keep it
+    // at 4 — ORT's default — and let unblend handle thread negotiation.
     numThreads: 4,
     ...(modelUrl ? { modelUrl } : {}),
   });
@@ -118,8 +211,19 @@ export async function separateAndRecombine(
     });
 
     const stems = result.stems;
-    // htdemucs produces: drums, bass, other, vocals (all interleaved stereo).
-    const nonVocalKeys = ["drums", "bass", "other"].filter((k) => k in stems);
+    // Pick the non-vocal stems to sum, per model family:
+    // - multi-stem models (htdemucs/htdemucs_6s/scnet): sum drums+bass+other.
+    // - complement models (melband_roformer_kim): unblend already computes
+    //   "other" = mixture − vocals as a single stem, so use just that one.
+    const config = MODEL_CONFIGS[model];
+    let nonVocalKeys: string[];
+    if (config.complement) {
+      nonVocalKeys = [config.complement.name].filter((k) => k in stems);
+    } else {
+      nonVocalKeys = ["drums", "bass", "other"].filter(
+        (k) => config.modelSources.includes(k) && k in stems,
+      );
+    }
     if (nonVocalKeys.length === 0) {
       throw new Error("Stem separation produced no usable stems.");
     }

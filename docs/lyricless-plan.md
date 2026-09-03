@@ -298,7 +298,8 @@ No test suite exists yet (see implementation.md §12); keep verification manual 
 - **Audio codec/bitrate for output:** AAC 192 kbps stereo (matches typical source quality; MP4 container via mediabunny's `Mp4OutputFormat` + WebCodecs AAC encoder — verify `canEncodeAudio('aac')` in spike S3; Electron/Chromium supports it).
 - **kara.moe hardsubs are H.264/AAC MP4** (assumed from the site; confirmed by existing playback working in Chromium). If a song uses an exotic codec, error out cleanly (§8).
 - **unblend pinning:** install from a pinned git SHA of `web/unblend`; revisit when/if it lands on npm.
-- Not doing in v1: cancel button (abort exists in the API — easy follow-up), batch processing, per-stem volume mixing UI, model picker settings screen.
+- ~~Model picker settings screen~~ — **done** (see `src/views/ConfigView.vue` + `src/lyricless/models.ts`).
+- Not doing in v1: cancel button (abort exists in the API — easy follow-up), batch processing, per-stem volume mixing UI.
 
 ## 12. References
 

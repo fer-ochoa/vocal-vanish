@@ -30,15 +30,18 @@ write new MP4 ────IPC────────►   atomic write <kid>.ly
 |------|------|
 | `src/lyricless/pipeline.ts` | Full pipeline orchestration: decode → separate → mux. Exports `generateLyricless(videoBytes, onProgress)`. |
 | `src/lyricless/stems.ts` | Audio decode, 44.1 kHz resample, unblend separator load/separate/recombine. Model caching via IPC. |
-| `src/views/CatalogView.vue` | Per-row *Lyricless* button + full-screen progress overlay (`.overlay`/`.bar` pattern). |
+| `src/views/CatalogView.vue` | Per-row *Lyricless* button + full-screen progress overlay (`.overlay`/`.bar` pattern). Reads the selected model from settings before running the pipeline. |
 | `src/views/PlayerView.vue` | Original / Lyricless tab bar. Lazy-loads lyricless blob on first tab switch. Placeholder + Generate button when not yet created. |
-| `src/index.ts` | IPC handlers: `kara:write-lyricless`, `kara:lyricless-status`, `kara:model-status`, `kara:model-stream`, `kara:save-model`. Delete removes both files. `kara:media-stream` accepts a `variant` param. |
-| `src/preload.ts` | Bridge: `writeLyricless()`, `lyriclessStatus()`, `modelStatus()`, `openModelStream()`, `saveModel()`, `openMediaStream(kid, variant?)`. |
+| `src/views/ConfigView.vue` | *Config* screen: separation-model dropdown (persisted via settings IPC) + WebGPU/WASM backend status badge. |
+| `src/lyricless/models.ts` | Catalog of unblend's six models (labels, fp16 sizes, `webgpuRequired`) mirroring unblend's `MODEL_CONFIGS`/`MODEL_ARTIFACTS`; default-model fallback helper. |
+| `src/index.ts` | IPC handlers: `kara:write-lyricless`, `kara:lyricless-status`, `kara:model-status(modelId?)`, `kara:model-stream(modelId?)`, `kara:save-model(modelId, data)`, `kara:settings-get` / `kara:settings-set`. Delete removes both files. `kara:media-stream` accepts a `variant` param. |
+| `src/preload.ts` | Bridge: `writeLyricless()`, `lyriclessStatus()`, `modelStatus(modelId?)`, `openModelStream(modelId?)`, `saveModel(modelId, data)`, `getSettings()`, `setSettings(patch)`, `openMediaStream(kid, variant?)`. |
 
 ## Stem separation (unblend)
 
 - **Library:** [unblend](https://github.com/Ryan5453/unblend) v1.0.0, pinned via a local tarball (`unblend-1.0.0.tgz` at repo root, installed as `"unblend": "file:unblend-1.0.0.tgz"`).
-- **Model:** htdemucs fp16 (~91 MB ONNX), fetched from HuggingFace on first use and cached in `userData/htdemucs_fp16.onnx`. Subsequent runs load from disk via IPC (no re-download).
+- **Model:** selectable on the *Config* screen from unblend's six models (default `htdemucs`). Each model's fp16 ONNX weights are fetched from HuggingFace on first use and cached in `userData/<model>_fp16.onnx`; subsequent runs load from disk via IPC (no re-download). The choice is persisted in `userData/settings.json` (`{ "separationModel": "<id>" }`).
+- **Stem mixing is model-aware:** multi-stem models sum `drums + bass + other`; complement models (`melband_roformer_kim`) use unblend's computed `other = mixture − vocals` stem directly (see `MODEL_CONFIGS[model].complement`).
 - **Backend:** WebGPU preferred, automatic WASM fallback. ORT wasm sidecars are copied to `main_window/ort/` by CopyWebpackPlugin; the directory URL is passed as `wasmPaths`.
 - **Output:** htdemucs produces 4 interleaved-stereo stems (drums, bass, other, vocals). We sum drums + bass + other and clamp to [-1, 1].
 
@@ -50,7 +53,7 @@ write new MP4 ────IPC────────►   atomic write <kid>.ly
   - An `AudioSampleSource` (Opus, 128 kbps) is attached via `output.addAudioTrack()`. The recombined stems are resampled to 48 kHz (WebCodecs requirement) and fed in ~1-second chunks.
 - **Output:** MP4 with original video + Opus audio → `BufferTarget.buffer` → written to disk via IPC.
 
-## WebGPU enablement
+## WebGPU enablement & backend detection
 
 Two Chromium flags are set at app startup (`src/index.ts`) before the window is created:
 
@@ -60,6 +63,8 @@ app.commandLine.appendSwitch("enable-features", "ForceEnableWebGpuInterop");
 ```
 
 These allow WebGPU to function in Electron's sandboxed renderer. Without them, `navigator.gpu.requestAdapter()` returns null and unblend falls back to WASM.
+
+The *Config* screen reports which backend will actually be used. Detection runs **in the renderer** (`src/views/ConfigView.vue`) because `navigator.gpu` only exists there — the main process is Node and has no WebGPU API. The check mirrors unblend's own internal probe exactly (`navigator.gpu` present + `requestAdapter()` non-null), so the badge matches what `Separator.load()` will commit to. Note: even when WebGPU is detected, unblend still falls back to WASM per-model if ORT session creation fails at load time; the badge reflects the primary path, not a guarantee.
 
 ## CSP additions
 
@@ -74,7 +79,8 @@ The `connect-src` directive includes:
 |------|----------|
 | `userData/kara-catalog/<kid>.lyricless.mp4` | Generated lyricless video |
 | `userData/kara-catalog/catalog.json` | Index; each entry may have `lyriclessFile: "<kid>.lyricless.mp4"` |
-| `userData/htdemucs_fp16.onnx` | Cached ONNX model (~91 MB) |
+| `userData/<model>_fp16.onnx` | Cached ONNX weights for each separation model used (e.g. `htdemucs_fp16.onnx`, ~91 MB) |
+| `userData/settings.json` | App settings; currently `{ "separationModel": "<unblend model id>" }` |
 
 ## Webpack configuration notes
 
@@ -84,5 +90,6 @@ The `connect-src` directive includes:
 
 ## UI behavior
 
-- **Catalog:** Each row shows a *Lyricless* button (disabled while any processing runs) and a "Lyricless" badge when `entry.lyriclessFile` is set. Clicking the button opens a full-screen overlay with stage label + percentage bar (decode 0–10%, separate 10–80%, mux 80–100%).
+- **Catalog:** Each row shows a *Lyricless* button (disabled while any processing runs) and a "Lyricless" badge when `entry.lyriclessFile` is set. Clicking the button opens a full-screen overlay with stage label + percentage bar (decode 0–10%, separate 10–80%, mux 80–100%). The pipeline uses the model selected on the Config screen.
 - **Player:** Tab bar switches between Original and Lyricless. The lyricless file is lazy-loaded on first tab switch. If it doesn't exist, a placeholder message + *Generate Lyricless* button (routes to Catalog) is shown.
+- **Config:** Two cards. *Separation model* — dropdown of the six unblend models with description + first-run download size; selection persists immediately via `kara:settings-set`. Models flagged `webgpuRequired` show a warning when WebGPU is unavailable. *Processing backend* — badge showing "WebGPU (GPU acceleration)" or "CPU WebAssembly fallback", computed on mount by the renderer-side probe described above.

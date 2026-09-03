@@ -17,6 +17,7 @@ This is a proof of concept. The UI is intentionally simple and minimal.
 1. **Search** (main screen) — search bar + criteria dropdown, paginated result rows, per-row *Download* button and loading overlay.
 2. **Catalog** (via side menu) — searchable list of downloaded songs with *Play* / *Lyricless* / delete buttons. A "Lyricless" badge appears on entries that already have a generated vocal-free version.
 3. **Player** — minimal video.js player for the selected song, with an Original / Lyricless tab to switch between the full mix and the stem-separated instrumental.
+4. **Config** (via side menu) — pick the stem-separation model used by *Lyricless* (dropdown of unblend's six models, persisted in `settings.json`) and see whether processing will run on **WebGPU** or fall back to **CPU WebAssembly**.
 
 ## Tech stack
 
@@ -53,7 +54,7 @@ Downloads go to the Electron `userData` directory under a `kara-catalog/` subfol
 - **macOS:** `~/Library/Application Support/vocal-vanish/kara-catalog/`
 - **Windows:** `%APPDATA%/vocal-vanish/kara-catalog/`
 
-Each video is saved as `<kid>.<size>.<hash>.mp4`, and a `catalog.json` index file tracks metadata (title, series, singer, duration, size, download date) keyed by KID. Generated lyricless versions are stored alongside as `<kid>.lyricless.mp4`. The htdemucs ONNX model (~91 MB) is cached once in the `userData` root and reused across sessions.
+Each video is saved as `<kid>.<size>.<hash>.mp4`, and a `catalog.json` index file tracks metadata (title, series, singer, duration, size, download date) keyed by KID. Generated lyricless versions are stored alongside as `<kid>.lyricless.mp4`. Separation-model ONNX weights are cached once per model in the `userData` root (`<model>_fp16.onnx`) and reused across sessions. App settings (currently: the selected separation model) live in `settings.json` in `userData`.
 
 ## API used
 

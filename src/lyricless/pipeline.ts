@@ -19,6 +19,8 @@ import {
   AudioSample,
   Quality,
 } from 'mediabunny';
+import type { ModelType } from 'unblend';
+import { getModel } from './models';
 import { decodeAudio, resampleTo44100, separateAndRecombine } from './stems';
 
 /** Progress callback for the full pipeline. */
@@ -36,13 +38,17 @@ export interface PipelineProgress {
  *
  * @param videoBytes  The original MP4 (hardsub) file bytes.
  * @param onProgress  Optional progress callback.
+ * @param modelId     Separation model to use (from the Config screen).
+ *                    Defaults to htdemucs.
  * @returns The new lyricless MP4 as an ArrayBuffer, ready to be written to
  *          disk via `window.kara.writeLyricless()`.
  */
 export async function generateLyricless(
   videoBytes: ArrayBuffer,
   onProgress?: (p: PipelineProgress) => void,
+  modelId?: ModelType,
 ): Promise<ArrayBuffer> {
+  const model = getModel(modelId);
   const blob = new Blob([videoBytes], { type: 'video/mp4' });
 
   // -----------------------------------------------------------------------
@@ -68,21 +74,38 @@ export async function generateLyricless(
   // -----------------------------------------------------------------------
   const resampled = await resampleTo44100(decodedBuffer);
 
-  // Ensure the model is cached locally (first run downloads ~91 MB from
-  // HuggingFace; subsequent runs load from disk).
+  // Ensure the model is cached locally (first run downloads the fp16 ONNX
+  // weights from HuggingFace; subsequent runs load from disk).
   onProgress?.({ stage: 'separate', fraction: 0, label: 'Checking model…' });
-  const status = await window.kara.modelStatus();
+  const status = await window.kara.modelStatus(model.id);
   if (!status.cached) {
-    onProgress?.({ stage: 'separate', fraction: 0.05, label: 'Downloading model (first run)…' });
-    const MODEL_URL =
-      'https://huggingface.co/Ryan5453/unblend/resolve/eda32466a76dc81c5e66af6577dbc20fb219e959/htdemucs_fp16.onnx';
-    const resp = await fetch(MODEL_URL);
+    onProgress?.({ stage: 'separate', fraction: 0.05, label: `Downloading ${model.label} (first run)…` });
+    // The URL must match unblend's MODEL_ARTIFACTS[model].fp16 — it is the
+    // immutable HF revision the library verifies against, so keep them in
+    // sync when upgrading unblend.
+    const MODEL_URLS: Record<string, string> = {
+      htdemucs:
+        'https://huggingface.co/Ryan5453/unblend/resolve/eda32466a76dc81c5e66af6577dbc20fb219e959/htdemucs_fp16.onnx',
+      htdemucs_6s:
+        'https://huggingface.co/Ryan5453/unblend/resolve/eda32466a76dc81c5e66af6577dbc20fb219e959/htdemucs_6s_fp16.onnx',
+      scnet_small:
+        'https://huggingface.co/Ryan5453/unblend/resolve/ac4b06164d974e1242bd9fc7585305e5ea022d0f/scnet_small_fp16.onnx',
+      melband_roformer_kim:
+        'https://huggingface.co/Ryan5453/unblend/resolve/a80a71b41face40edc91178c07edfedeca4cbb19/melband_roformer_kim_fp16.onnx',
+      bs_roformer_sw:
+        'https://huggingface.co/Ryan5453/unblend/resolve/a80a71b41face40edc91178c07edfedeca4cbb19/bs_roformer_sw_fp16.onnx',
+      scnet_xl_wide_v5:
+        'https://huggingface.co/Ryan5453/unblend/resolve/396e6583cea8e5104f35c05d87cf60883794a58e/scnet_xl_wide_v5_fp16.onnx',
+    };
+    const url = MODEL_URLS[model.id];
+    if (!url) throw new Error(`No download URL registered for model ${model.id}.`);
+    const resp = await fetch(url);
     if (!resp.ok) throw new Error(`Model download failed: HTTP ${resp.status}`);
     const modelBytes = await resp.arrayBuffer();
-    await window.kara.saveModel(modelBytes);
+    await window.kara.saveModel(model.id, modelBytes);
   }
 
-  onProgress?.({ stage: 'separate', fraction: 0.1, label: 'Separating stems…' });
+  onProgress?.({ stage: 'separate', fraction: 0.1, label: `Separating stems (${model.label})…` });
 
   const { interleaved, numSamples, separator } = await separateAndRecombine(
     resampled,
@@ -93,6 +116,7 @@ export async function generateLyricless(
         label: `Separating stems… ${Math.round(p.fraction * 100)}%`,
       });
     },
+    model.id,
   );
 
   // -----------------------------------------------------------------------

@@ -378,6 +378,69 @@ body {
   color: #fff;
 }
 
+/* --- Config screen ---------------------------------------------------------- */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  margin-top: 16px;
+}
+
+.card-title {
+  font-size: 15px;
+  margin: 0 0 4px;
+}
+
+.field-label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin: 14px 0 6px;
+  font-weight: 500;
+}
+
+.model-select {
+  width: 320px;
+  max-width: 100%;
+  cursor: pointer;
+}
+
+.model-desc {
+  margin-top: 8px;
+  max-width: 560px;
+}
+
+.backend-row {
+  margin: 10px 0 6px;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  padding: 6px 14px;
+}
+
+.badge-gpu {
+  background: rgba(79, 140, 255, 0.18);
+  color: var(--accent);
+  border: 1px solid var(--accent-2);
+}
+
+.badge-cpu {
+  background: rgba(139, 149, 163, 0.15);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+.warn {
+  margin-top: 12px;
+  font-size: 13px;
+  color: #e8a34c;
+}
+
 /* --- Transitions ---------------------------------------------------------- */
 .fade-enter-active,
 .fade-leave-active {

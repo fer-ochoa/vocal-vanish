@@ -116,6 +116,16 @@ async function startLyricless(entry: any): Promise<void> {
   error.value = '';
 
   try {
+    // Read the model selected on the Config screen before showing the
+    // overlay, so a missing/invalid setting never strands the UI.
+    let modelId: string | undefined;
+    try {
+      const settings = await window.kara.getSettings();
+      modelId = settings.separationModel;
+    } catch {
+      /* fall back to the pipeline default (htdemucs) */
+    }
+
     // Stream the original video bytes from the main process.
     const buf = await window.kara.openMediaStream(entry.kid);
 
@@ -126,7 +136,7 @@ async function startLyricless(entry: any): Promise<void> {
       const stageWeight = p.stage === 'decode' ? 0.1 : p.stage === 'separate' ? 0.7 : 0.2;
       const stageStart = p.stage === 'decode' ? 0 : p.stage === 'separate' ? 10 : 80;
       processPct.value = Math.round(stageStart + p.fraction * stageWeight * 100);
-    });
+    }, modelId as any);
 
     // Write the result to disk via IPC.
     await window.kara.writeLyricless(entry.kid, lyriclessBytes);
