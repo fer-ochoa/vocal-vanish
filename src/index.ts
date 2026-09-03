@@ -14,7 +14,13 @@ declare const MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
 if (require("electron-squirrel-startup")) {
   app.quit();
 }
-//app.commandLine.appendSwitch("enable-unsafe-webgpu");
+
+app.commandLine.appendSwitch("enable-unsafe-webgpu");
+
+app.commandLine.appendSwitch("enable-features", "ForceEnableWebGpuInterop");
+
+//app.commandLine.appendSwitch("force_high_performance_gpu");
+
 // ---------------------------------------------------------------------------
 // Kara moe API client (main process only — the renderer never touches the
 // network directly, following Electron security best practices).
