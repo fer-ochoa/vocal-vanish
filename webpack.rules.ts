@@ -15,9 +15,21 @@ export const rules: Required<ModuleOptions>['rules'] = [
     test: /native_modules[/\\].+\.node$/,
     use: 'node-loader',
   },
+  // ORT wasm sidecars must be emitted as static assets so they can be
+  // fetched at runtime. The asset relocator would mangle these paths.
+  {
+    test: /\.wasm$/,
+    type: 'asset/resource',
+    generator: { filename: 'ort-assets/[name][ext]' },
+  },
+  // Exclude unblend and onnxruntime-web from the asset relocator. The
+  // relocator emits raw file copies that can't resolve bare imports in a
+  // browser worker context. By excluding them, webpack bundles ORT into the
+  // worker chunks and handles `new Worker(new URL(...))` natively.
   {
     test: /[/\\]node_modules[/\\].+\.(m?js|node)$/,
     parser: { amd: false },
+    exclude: [/onnxruntime-web/, /unblend/],
     use: {
       loader: '@vercel/webpack-asset-relocator-loader',
       options: {

@@ -15,6 +15,12 @@ if (require("electron-squirrel-startup")) {
   app.quit();
 }
 
+app.commandLine.appendSwitch("enable-unsafe-webgpu");
+
+app.commandLine.appendSwitch("enable-features", "ForceEnableWebGpuInterop");
+
+//app.commandLine.appendSwitch("force_high_performance_gpu");
+
 // ---------------------------------------------------------------------------
 // Kara moe API client (main process only — the renderer never touches the
 // network directly, following Electron security best practices).
@@ -68,6 +74,7 @@ export interface CatalogEntry {
   file: string; // filename of the hardsub video inside the catalog dir
   size: number | null; // bytes
   downloadedAt: string; // ISO date
+  lyriclessFile?: string | null; // filename of the lyricless variant, if generated
 }
 
 /** A row shown in the search results list. */
@@ -323,7 +330,8 @@ function registerIpc(): void {
   // webpack-dev-server HTTP origin, which is not allowed to fetch local files),
   // so we pipe the bytes back over IPC and let the renderer wrap them as a
   // fetch-compatible body. This works identically in dev and production.
-  ipcMain.on("kara:media-stream", (e, kid: string) => {
+  // `variant` selects which file to stream: "original" (default) or "lyricless".
+  ipcMain.on("kara:media-stream", (e, kid: string, variant?: string) => {
     const index = readIndex();
     const entry = index[kid];
     if (!entry) {
@@ -333,7 +341,18 @@ function registerIpc(): void {
       });
       return;
     }
-    const p = path.join(CATALOG_DIR(), entry.file);
+    const fileName = variant === "lyricless" ? entry.lyriclessFile : entry.file;
+    if (!fileName) {
+      e.reply("kara:media-data", {
+        ok: false,
+        error:
+          variant === "lyricless"
+            ? "Lyricless version has not been generated yet."
+            : "No file recorded for this song.",
+      });
+      return;
+    }
+    const p = path.join(CATALOG_DIR(), fileName);
     if (!fs.existsSync(p)) {
       e.reply("kara:media-data", {
         ok: false,
@@ -351,7 +370,7 @@ function registerIpc(): void {
     stream.on("end", () => e.reply("kara:media-data", { ok: true }));
   });
 
-  // Delete a song (video file + catalog entry).
+  // Delete a song (video file + lyricless variant + catalog entry).
   ipcMain.handle("kara:delete", async (_e, kid: string) => {
     const index = readIndex();
     const entry = index[kid];
@@ -361,11 +380,104 @@ function registerIpc(): void {
       } catch {
         /* file may already be gone */
       }
+      if (entry.lyriclessFile) {
+        try {
+          fs.unlinkSync(path.join(CATALOG_DIR(), entry.lyriclessFile));
+        } catch {
+          /* file may already be gone */
+        }
+      }
       delete index[kid];
       writeIndex(index);
     }
     return true;
   });
+
+  // Write a lyricless video to the catalog directory. The renderer performs
+  // all DSP (stem separation + re-muxing) and sends the final MP4 bytes here.
+  ipcMain.handle(
+    "kara:write-lyricless",
+    async (_e, kid: string, data: ArrayBuffer): Promise<CatalogEntry> => {
+      const index = readIndex();
+      const entry = index[kid];
+      if (!entry) throw new Error(`Song ${kid} is not in the local catalog.`);
+
+      ensureCatalogDir();
+      const lyriclessName = `${kid}.lyricless.mp4`;
+      const finalPath = path.join(CATALOG_DIR(), lyriclessName);
+      const tmpPath = `${finalPath}.part`;
+
+      // Clean up any stale partial file.
+      try {
+        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      } catch {
+        /* ignore */
+      }
+
+      fs.writeFileSync(tmpPath, Buffer.from(data));
+      fs.renameSync(tmpPath, finalPath);
+
+      entry.lyriclessFile = lyriclessName;
+      writeIndex(index);
+      return entry;
+    },
+  );
+
+  // Check whether a lyricless variant exists for a song.
+  ipcMain.handle("kara:lyricless-status", async (_e, kid: string) => {
+    const index = readIndex();
+    const entry = index[kid];
+    if (!entry) return { exists: false };
+    if (entry.lyriclessFile) {
+      const p = path.join(CATALOG_DIR(), entry.lyriclessFile);
+      return { exists: fs.existsSync(p), file: entry.lyriclessFile };
+    }
+    return { exists: false };
+  });
+
+  // Check whether the htdemucs model is cached locally. The renderer calls
+  // this before loading the separator; if the file exists, it creates a blob:
+  // URL and passes it as `modelUrl` to unblend (skipping the ~91 MB download).
+  ipcMain.handle("kara:model-status", async () => {
+    const modelPath = path.join(app.getPath("userData"), "htdemucs_fp16.onnx");
+    if (!fs.existsSync(modelPath)) return { cached: false };
+    const stat = fs.statSync(modelPath);
+    return { cached: true, size: stat.size };
+  });
+
+  // Stream the cached model file to the renderer (same chunked pattern as
+  // kara:media-stream). The renderer wraps it in a Blob + object URL.
+  ipcMain.on("kara:model-stream", (e) => {
+    const modelPath = path.join(app.getPath("userData"), "htdemucs_fp16.onnx");
+    if (!fs.existsSync(modelPath)) {
+      e.reply("kara:model-data", {
+        ok: false,
+        error: "Model file not found.",
+      });
+      return;
+    }
+    const stream = fs.createReadStream(modelPath);
+    stream.on("data", (chunk: Buffer) =>
+      e.sender.send("kara:model-data", { chunk }),
+    );
+    stream.on("error", (err: Error) =>
+      e.reply("kara:model-data", { ok: false, error: err.message }),
+    );
+    stream.on("end", () => e.reply("kara:model-data", { ok: true }));
+  });
+
+  // Save the model file to disk after the renderer downloads it from
+  // HuggingFace. Subsequent runs load from cache instead of re-downloading.
+  ipcMain.handle(
+    "kara:save-model",
+    async (_e, data: ArrayBuffer): Promise<void> => {
+      const modelPath = path.join(
+        app.getPath("userData"),
+        "htdemucs_fp16.onnx",
+      );
+      fs.writeFileSync(modelPath, Buffer.from(data));
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +506,7 @@ function applyCsp(): void {
     "img-src 'self' data: blob:",
     "media-src 'self' blob: file:",
     "font-src 'self' data:",
-    "connect-src 'self' https://kara.moe",
+    "connect-src 'self' blob: https://kara.moe https://huggingface.co https://*.hf.co https://*.huggingface.co",
   ].join("; ");
 
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
@@ -402,6 +514,8 @@ function applyCsp(): void {
       responseHeaders: {
         ...details.responseHeaders,
         "Content-Security-Policy": [csp],
+        "Cross-Origin-Opener-Policy": ["same-origin"],
+        "Cross-Origin-Embedder-Policy": ["require-corp"],
       },
     });
   });

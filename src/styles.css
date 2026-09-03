@@ -332,6 +332,52 @@ body {
   overflow: hidden;
 }
 
+/* --- Tabs (Original / Lyricless) ------------------------------------------- */
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-top: 14px;
+}
+
+.tab {
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.tab:hover {
+  background: #262c37;
+  color: var(--text);
+}
+
+.tab.active {
+  background: var(--accent);
+  border-color: var(--accent-2);
+  color: #fff;
+}
+
+/* --- Lyricless placeholder -------------------------------------------------- */
+.lyricless-placeholder {
+  margin-top: 40px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+/* --- Accent tag (Lyricless badge in catalog) -------------------------------- */
+.tag-accent {
+  background: var(--accent);
+  color: #fff;
+}
+
 /* --- Transitions ---------------------------------------------------------- */
 .fade-enter-active,
 .fade-leave-active {
