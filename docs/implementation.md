@@ -6,13 +6,14 @@ This document is a complete, self-contained description of how this project is b
 
 ## 1. What the app does
 
-A desktop client for the **Kara moe API** (anime karaoke videos with hardcoded subtitles). Three screens:
+A desktop client for the **Kara moe API** (anime karaoke videos with hardcoded subtitles). Four screens:
 
 1. **Search** — query the Kara moe database, show paginated results, download a song's hardsubbed video.
-2. **Catalog** — list locally downloaded songs (title, series, singer, duration), filter, play, delete.
-3. **Player** — play a downloaded video with video.js (subtitles are burned in, so no separate track is needed).
+2. **Catalog** — list locally downloaded songs (title, series, singer, duration), filter, play, delete, generate lyricless versions.
+3. **Config** — pick the stem-separation model used for lyricless generation (persisted) and show whether processing will run on WebGPU or fall back to CPU WebAssembly.
+4. **Player** — play a downloaded video with video.js (subtitles are burned in, so no separate track is needed).
 
-The app is a **proof of concept**: simple, minimal UI, no auth, no settings screen.
+The app is a **proof of concept**: simple, minimal UI, no auth, and a single minimal Config screen.
 
 ---
 
@@ -126,6 +127,12 @@ This file owns everything privileged. Major sections:
 - Helpers: `ensureCatalogDir()`, `readIndex()`, `writeIndex(index)`, `songToRow(song)`.
 - Video files are saved into the same directory as `<kid>.<size>.<hash>.mp4` (the `hardsubbed_mediafile` name).
 
+### Settings store
+- **File:** `path.join(app.getPath('userData'), 'settings.json')` — a JSON `AppSettings { separationModel: string }`.
+- Helpers: `readSettings()` (falls back to `DEFAULT_SEPARATION_MODEL = 'htdemucs'` when the file is missing/corrupt or the id is not in `VALID_MODELS`), `writeSettings()`, `assertValidModel()` (also guards the model id used in cache filenames).
+- `VALID_MODELS` is a static allowlist of the model ids accepted by the installed unblend version; keep it in sync with `SEPARATION_MODELS` in `src/lyricless/models.ts` (the main process must not import unblend, which is an ESM renderer-only library).
+- Model cache files live directly in `userData` as `<model>_fp16.onnx`.
+
 ### HTTP helpers
 - `httpGetJson<T>(url)` — GET a JSON endpoint using `https.get`; follows **one** redirect; rejects on 4xx/5xx.
 - `downloadFile(url, destPath, onProgress)` — streams a file to disk via `res.pipe(fs.createWriteStream)`, following redirects, calling `onProgress(receivedBytes, totalBytes|null)` per chunk (total from `content-length`). Resolves with final byte count.
@@ -138,6 +145,8 @@ This file owns everything privileged. Major sections:
 | `kara:download` | `handle` | Params `kid`. Fetches song detail, downloads `hardsubbed_mediafile` to `<dir>/<name>.mp4` (via a `.part` temp file, then atomic `rename`), sends `kara:download-progress` events during transfer, writes the catalog index, returns the new `CatalogEntry`. |
 | `kara:media-stream` | `on` (send) | Params `kid`. Pipes the local video file to the renderer as `kara:media-data` messages (see §6). |
 | `kara:delete` | `handle` | Params `kid`. Deletes the video file + index entry. |
+| `kara:settings` | `handle` | Returns the persisted `AppSettings` (see Settings store). |
+| `kara:set-separation-model` | `handle` | Params `model`. Validates against `VALID_MODELS` (throws on unknown id), persists, returns the new `AppSettings`. |
 
 **Download progress events:** main sends `sender.send('kara:download-progress', { kid, received, total })` as bytes arrive; the renderer listens and updates the overlay.
 
@@ -173,6 +182,8 @@ Exposes `window.kara` with these methods (the **complete** renderer API surface)
 | `download(kid)` | `Promise<CatalogEntry>` | invoke `kara:download` (resolves when fully downloaded) |
 | `openMediaStream(kid)` | `Promise<ArrayBuffer>` | **see below** |
 | `delete(kid)` | `Promise<boolean>` | invoke `kara:delete` |
+| `settings()` | `Promise<AppSettings>` | invoke `kara:settings` (current `separationModel`) |
+| `setSeparationModel(model)` | `Promise<AppSettings>` | invoke `kara:set-separation-model` (validated + persisted) |
 | `onDownloadProgress(cb)` | `() => void` (unsubscribe) | listens to `kara:download-progress` |
 
 ### How video playback works (the important part)

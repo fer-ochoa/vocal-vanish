@@ -1,12 +1,18 @@
 /**
  * Stem separation and recombination for the lyricless pipeline.
  *
- * Uses unblend's Separator (htdemucs model) to split audio into
- * drums / bass / other / vocals, then sums everything except vocals
- * back into a single interleaved-stereo Float32Array.
+ * Uses unblend's Separator with the model selected on the Config screen
+ * (htdemucs by default) to split audio into stems, then sums everything
+ * except the vocals stem back into a single interleaved-stereo Float32Array.
+ * The "all stems but vocals" rule covers every supported model: multi-stem
+ * separators (htdemucs, htdemucs_6s, bs_roformer_sw, the SCNets) return the
+ * instruments as separate stems, and the single-mask model
+ * (melband_roformer_kim) returns vocals + an 'other' complement that is
+ * already the full instrumental.
  */
 
 import { Separator, MODEL_ARTIFACTS } from "unblend";
+import type { ModelType } from "unblend";
 
 /** Progress callback for the stem separation stage. */
 export interface StemProgress {
@@ -58,15 +64,17 @@ export async function resampleTo44100(
 
 /**
  * Separate an AudioBuffer into stems and recombine all non-vocal stems
- * (drums + bass + other) into a single interleaved-stereo Float32Array.
+ * into a single interleaved-stereo Float32Array.
  *
  * @param audio  A 44.1 kHz, 1–2 channel AudioBuffer.
+ * @param model  unblend model id (from the Config screen's selection).
  * @param onProgress  Optional callback for per-segment progress.
  * @returns An object with the recombined stem data and the separator
  *          (call `separator.unload()` when done to free GPU/CPU resources).
  */
 export async function separateAndRecombine(
   audio: AudioBuffer,
+  model: ModelType,
   onProgress?: (p: StemProgress) => void,
 ): Promise<{
   interleaved: Float32Array;
@@ -80,20 +88,20 @@ export async function separateAndRecombine(
   // so 'ort/' resolves correctly relative to document.baseURI.
   const ortWasmDir = new URL("ort/", document.baseURI).href;
 
-  // Check if the model is cached locally (avoids re-downloading ~85 MB).
+  // Check if the model is cached locally (avoids re-downloading it).
   // A size mismatch means the cached file is stale (an export from an older
   // unblend revision, which the metadata check would reject) or truncated;
   // ignore it and let unblend fetch its own registered artifact instead.
   let modelUrl: string | undefined;
-  const status = await window.kara.modelStatus();
-  if (status.cached && status.size === MODEL_ARTIFACTS.htdemucs.fp16.sizeBytes) {
-    const buf = await window.kara.openModelStream();
+  const status = await window.kara.modelStatus(model);
+  if (status.cached && status.size === MODEL_ARTIFACTS[model].fp16.sizeBytes) {
+    const buf = await window.kara.openModelStream(model);
     modelUrl = URL.createObjectURL(
       new Blob([buf], { type: "application/octet-stream" }),
     );
   }
 
-  const separator = await Separator.load("htdemucs", {
+  const separator = await Separator.load(model, {
     precision: "fp16",
     backend: "webgpu",
     wasmPaths: ortWasmDir,
@@ -121,8 +129,10 @@ export async function separateAndRecombine(
     });
 
     const stems = result.stems;
-    // htdemucs produces: drums, bass, other, vocals (all interleaved stereo).
-    const nonVocalKeys = ["drums", "bass", "other"].filter((k) => k in stems);
+    // Every supported model returns a 'vocals' stem; the lyricless track is
+    // the sum of all the others (drums/bass/other[/guitar/piano], or the
+    // single 'other' complement for the single-mask model).
+    const nonVocalKeys = Object.keys(stems).filter((k) => k !== "vocals");
     if (nonVocalKeys.length === 0) {
       throw new Error("Stem separation produced no usable stems.");
     }

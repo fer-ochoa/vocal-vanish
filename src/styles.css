@@ -428,6 +428,106 @@ body {
   color: #fff;
 }
 
+/* --- Config screen ---------------------------------------------------------- */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin: 18px 0;
+  max-width: 640px;
+}
+
+.card h2 {
+  font-size: 15px;
+  margin: 0 0 4px;
+}
+
+.config-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.config-field select {
+  font-size: 14px;
+  padding: 10px 12px;
+  min-width: 320px;
+}
+
+.saved-note {
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.model-meta {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 6px 12px;
+  margin: 14px 0 0;
+  font-size: 13px;
+}
+
+.model-meta dt {
+  color: var(--muted);
+}
+
+.model-meta dd {
+  margin: 0;
+}
+
+.warn-note {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(226, 160, 60, 0.12);
+  border: 1px solid rgba(226, 160, 60, 0.4);
+  color: #e2a03c;
+  font-size: 13px;
+}
+
+.accel-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.accel-text {
+  flex: 1;
+  margin: 0;
+  font-size: 13px;
+}
+
+.badge {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+.badge-ok {
+  background: rgba(46, 160, 67, 0.15);
+  border-color: var(--green);
+  color: #6cc07f;
+}
+
+.badge-warn {
+  background: rgba(226, 160, 60, 0.12);
+  border-color: rgba(226, 160, 60, 0.5);
+  color: #e2a03c;
+}
+
+.badge-dim {
+  opacity: 0.7;
+}
+
 /* --- Transitions ---------------------------------------------------------- */
 .fade-enter-active,
 .fade-leave-active {

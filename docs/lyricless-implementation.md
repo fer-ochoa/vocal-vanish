@@ -28,19 +28,22 @@ write new MP4 ────IPC────────►   atomic write <kid>.ly
 
 | File | Role |
 |------|------|
-| `src/lyricless/pipeline.ts` | Full pipeline orchestration: decode → separate → mux. Exports `generateLyricless(videoBytes, onProgress)`. |
-| `src/lyricless/stems.ts` | Audio decode, 44.1 kHz resample, unblend separator load/separate/recombine. Model caching via IPC. |
+| `src/lyricless/pipeline.ts` | Full pipeline orchestration: settings → decode → separate → mux. Reads the model selected on the Config screen via `window.kara.settings()`, rejects WebGPU-only models up front when WebGPU is unavailable, then downloads/caches the selected model's artifact. Exports `generateLyricless(videoBytes, onProgress)`. |
+| `src/lyricless/stems.ts` | Audio decode, 44.1 kHz resample, unblend separator load/separate/recombine for the selected model (`separateAndRecombine(audio, model, onProgress)`). Model cache lookup via IPC. |
+| `src/lyricless/models.ts` | Model catalog for the Config UI, derived from the installed unblend package's `MODEL_ARTIFACTS`/`MODEL_CONFIGS` (label, description, stems, fp16 size, `webgpuRequired`, license). |
+| `src/lyricless/accel.ts` | `detectAcceleration()` → `'webgpu' | 'wasm'` + adapter label/reason. Mirrors unblend's own probe (`navigator.gpu` + non-null `requestAdapter()`; no `requestDevice()`), so the UI predicts what `Separator.load` will actually do. |
+| `src/views/ConfigView.vue` | Config screen: model dropdown (WebGPU-only models disabled when no adapter), per-model metadata + cache status, WebGPU/CPU status badge with re-check button. |
 | `src/views/CatalogView.vue` | Per-row *Lyricless* button + full-screen progress overlay (`.overlay`/`.bar` pattern). |
 | `src/views/PlayerView.vue` | Original / Lyricless tab bar. Lazy-loads lyricless blob on first tab switch. Placeholder + Generate button when not yet created. |
-| `src/index.ts` | IPC handlers: `kara:write-lyricless`, `kara:lyricless-status`, `kara:model-status`, `kara:model-stream`, `kara:save-model`. Delete removes both files. `kara:media-stream` accepts a `variant` param. |
-| `src/preload.ts` | Bridge: `writeLyricless()`, `lyriclessStatus()`, `modelStatus()`, `openModelStream()`, `saveModel()`, `openMediaStream(kid, variant?)`. |
+| `src/index.ts` | IPC handlers: `kara:write-lyricless`, `kara:lyricless-status`, `kara:model-status(model)`, `kara:model-stream(model)`, `kara:save-model(model, data)`, `kara:settings`, `kara:set-separation-model(model)`. Delete removes both files. `kara:media-stream` accepts a `variant` param. |
+| `src/preload.ts` | Bridge: `writeLyricless()`, `lyriclessStatus()`, `modelStatus(model)`, `openModelStream(model)`, `saveModel(model, data)`, `settings()`, `setSeparationModel(model)`, `openMediaStream(kid, variant?)`. |
 
 ## Stem separation (unblend)
 
 - **Library:** [unblend](https://github.com/Ryan5453/unblend) v1.0.0, installed from npm (`"unblend": "^1.0.0"`).
-- **Model:** htdemucs fp16 (~85 MB ONNX), fetched from the HuggingFace artifact registered in the installed unblend package (`MODEL_ARTIFACTS`) on first use and cached in `userData/htdemucs_fp16.onnx`. Subsequent runs load from disk via IPC (no re-download); the cache is only used when its size matches the registered artifact, so stale exports from older unblend revisions are re-downloaded automatically.
-- **Backend:** WebGPU preferred, automatic WASM fallback. ORT wasm sidecars are copied to `main_window/ort/` by CopyWebpackPlugin; the directory URL is passed as `wasmPaths`.
-- **Output:** htdemucs produces 4 interleaved-stereo stems (drums, bass, other, vocals). We sum drums + bass + other and clamp to [-1, 1].
+- **Model:** chosen on the **Config screen** (default `htdemucs`) and persisted in `userData/settings.json` via `kara:settings` / `kara:set-separation-model`. The pipeline reads it with `window.kara.settings()`, so call sites don't pass it. All models run at fp16; the artifact URL/size come from the installed unblend package (`MODEL_ARTIFACTS`), downloaded on first use and cached per model in `userData/<model>_fp16.onnx`. Subsequent runs load from disk via IPC (no re-download); the cache is only used when its size matches the registered artifact, so stale exports from older unblend revisions are re-downloaded automatically.
+- **Backend:** WebGPU preferred, automatic WASM fallback (unblend's own behavior). ORT wasm sidecars are copied to `main_window/ort/` by CopyWebpackPlugin; the directory URL is passed as `wasmPaths`. The Config screen shows the current mode using `detectAcceleration()` in `src/lyricless/accel.ts`, which applies the *same* probe unblend uses (`navigator.gpu` present + `requestAdapter()` returns non-null) — it deliberately does not create a `GPUDevice` just to probe. Models flagged `webgpuRequired` (`bs_roformer_sw`, `scnet_xl_wide_v5`) are disabled in the dropdown while no adapter is found, and the pipeline rejects them **before** downloading (their fp16 graphs exceed the WASM heap).
+- **Output:** every supported model returns a `vocals` stem; the lyricless track sums **all other stems** and clamps to [-1, 1]. For multi-stem models (htdemucs: drums/bass/other; htdemucs_6s adds guitar/piano) that is the instrumental mix; for the single-mask model (`melband_roformer_kim`) the complement stem `other` is already mixture − vocals.
 
 ## Re-muxing (mediabunny)
 
@@ -74,7 +77,8 @@ The `connect-src` directive includes:
 |------|----------|
 | `userData/kara-catalog/<kid>.lyricless.mp4` | Generated lyricless video |
 | `userData/kara-catalog/catalog.json` | Index; each entry may have `lyriclessFile: "<kid>.lyricless.mp4"` |
-| `userData/htdemucs_fp16.onnx` | Cached ONNX model (~91 MB) |
+| `userData/settings.json` | Persisted Config (`{ "separationModel": "htdemucs" }`) |
+| `userData/<model>_fp16.onnx` | Cached ONNX model per selected model (e.g. `htdemucs_fp16.onnx`, ~91 MB) |
 
 ## Webpack configuration notes
 

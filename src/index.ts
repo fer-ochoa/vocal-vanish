@@ -182,6 +182,68 @@ function songToRow(song: Song, downloadedKids?: Set<string>): SearchRow {
 }
 
 // ---------------------------------------------------------------------------
+// App settings (~/.config/vocal-vanish/settings.json)
+// ---------------------------------------------------------------------------
+
+/**
+ * Model ids accepted by unblend's `Separator.load`. Keep in sync with the
+ * MODEL_ARTIFACTS registry of the installed unblend package (the renderer
+ * builds its model dropdown from that registry; this list is the main-process
+ * validation whitelist — model ids also feed the model cache filename, so
+ * unknown ids are rejected outright).
+ */
+const VALID_MODELS: readonly string[] = [
+  "htdemucs",
+  "htdemucs_6s",
+  "bs_roformer_sw",
+  "melband_roformer_kim",
+  "scnet_small",
+  "scnet_xl_wide_v5",
+];
+
+const DEFAULT_SEPARATION_MODEL = "htdemucs";
+
+export interface AppSettings {
+  /** unblend model used to generate lyricless videos. */
+  separationModel: string;
+}
+
+const SETTINGS_FILE = (): string =>
+  path.join(app.getPath("userData"), "settings.json");
+
+function readSettings(): AppSettings {
+  try {
+    const raw = JSON.parse(fs.readFileSync(SETTINGS_FILE(), "utf8"));
+    const model =
+      typeof raw.separationModel === "string" &&
+      VALID_MODELS.includes(raw.separationModel)
+        ? raw.separationModel
+        : DEFAULT_SEPARATION_MODEL;
+    return { separationModel: model };
+  } catch {
+    return { separationModel: DEFAULT_SEPARATION_MODEL };
+  }
+}
+
+function writeSettings(settings: AppSettings): void {
+  fs.mkdirSync(app.getPath("userData"), { recursive: true });
+  fs.writeFileSync(SETTINGS_FILE(), JSON.stringify(settings, null, 2));
+}
+
+/** Reject unknown model ids coming from the renderer (path-safety: the id
+ *  feeds the model cache filename). */
+function assertValidModel(model: unknown): string {
+  if (typeof model !== "string" || !VALID_MODELS.includes(model)) {
+    throw new Error(`Unknown separation model '${String(model)}'.`);
+  }
+  return model;
+}
+
+/** Cached ONNX filename for a model (we always use the fp16 artifact). */
+const modelCacheFile = (model: string): string =>
+  path.join(app.getPath("userData"), `${model}_fp16.onnx`);
+
+// ---------------------------------------------------------------------------
 // HTTP helpers (Node's https module — no extra dependencies).
 // ---------------------------------------------------------------------------
 
@@ -311,7 +373,9 @@ function registerIpc(): void {
       const downloadedKids = new Set(Object.keys(readIndex()));
       return {
         count: data.infos?.count ?? 0,
-        rows: (data.content || []).map((song) => songToRow(song, downloadedKids)),
+        rows: (data.content || []).map((song) =>
+          songToRow(song, downloadedKids),
+        ),
       };
     },
   );
@@ -526,22 +590,29 @@ function registerIpc(): void {
     return { exists: false };
   });
 
-  // Check whether the htdemucs model is cached locally. The renderer calls
-  // this before loading the separator; if the file exists (with the exact
-  // size the installed unblend package expects for its artifact), it creates
-  // a blob: URL and passes it as `modelUrl` to unblend (skipping the ~85 MB
-  // download).
-  ipcMain.handle("kara:model-status", async () => {
-    const modelPath = path.join(app.getPath("userData"), "htdemucs_fp16.onnx");
+  // Check whether a model's fp16 artifact is cached locally. The renderer
+  // calls this before loading the separator; if the file exists (with the
+  // exact size the installed unblend package expects for its artifact), it
+  // creates a blob: URL and passes it as `modelUrl` to unblend (skipping the
+  // model download). The cache file is named `<model>_fp16.onnx` under
+  // userData, one per model.
+  ipcMain.handle("kara:model-status", async (_e, model: unknown) => {
+    const modelPath = modelCacheFile(assertValidModel(model));
     if (!fs.existsSync(modelPath)) return { cached: false };
     const stat = fs.statSync(modelPath);
     return { cached: true, size: stat.size };
   });
 
-  // Stream the cached model file to the renderer (same chunked pattern as
+  // Stream a cached model file to the renderer (same chunked pattern as
   // kara:media-stream). The renderer wraps it in a Blob + object URL.
-  ipcMain.on("kara:model-stream", (e) => {
-    const modelPath = path.join(app.getPath("userData"), "htdemucs_fp16.onnx");
+  ipcMain.on("kara:model-stream", (e, model: unknown) => {
+    let modelPath: string;
+    try {
+      modelPath = modelCacheFile(assertValidModel(model));
+    } catch (err) {
+      e.reply("kara:model-data", { ok: false, error: (err as Error).message });
+      return;
+    }
     if (!fs.existsSync(modelPath)) {
       e.reply("kara:model-data", {
         ok: false,
@@ -559,16 +630,28 @@ function registerIpc(): void {
     stream.on("end", () => e.reply("kara:model-data", { ok: true }));
   });
 
-  // Save the model file to disk after the renderer downloads it from
+  // Save a model file to disk after the renderer downloads it from
   // HuggingFace. Subsequent runs load from cache instead of re-downloading.
   ipcMain.handle(
     "kara:save-model",
-    async (_e, data: ArrayBuffer): Promise<void> => {
-      const modelPath = path.join(
-        app.getPath("userData"),
-        "htdemucs_fp16.onnx",
-      );
+    async (_e, model: unknown, data: ArrayBuffer): Promise<void> => {
+      const modelPath = modelCacheFile(assertValidModel(model));
       fs.writeFileSync(modelPath, Buffer.from(data));
+    },
+  );
+
+  // App settings (Config screen).
+  ipcMain.handle("kara:settings", async (): Promise<AppSettings> =>
+    readSettings(),
+  );
+
+  ipcMain.handle(
+    "kara:set-separation-model",
+    async (_e, model: unknown): Promise<AppSettings> => {
+      const settings = readSettings();
+      settings.separationModel = assertValidModel(model);
+      writeSettings(settings);
+      return settings;
     },
   );
 }

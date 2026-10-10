@@ -1,6 +1,7 @@
 import { createRouter, createWebHashHistory } from 'vue-router';
 import SearchView from './views/SearchView.vue';
 import CatalogView from './views/CatalogView.vue';
+import ConfigView from './views/ConfigView.vue';
 import PlayerView from './views/PlayerView.vue';
 
 // Hash history works cleanly with Electron's file:// loading and avoids any
@@ -10,6 +11,7 @@ export default createRouter({
   routes: [
     { path: '/', name: 'search', component: SearchView },
     { path: '/catalog', name: 'catalog', component: CatalogView },
+    { path: '/config', name: 'config', component: ConfigView },
     { path: '/player/:kid', name: 'player', component: PlayerView, props: true },
   ],
 });

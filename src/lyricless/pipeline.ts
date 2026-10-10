@@ -1,8 +1,11 @@
 /**
  * Full lyricless-video pipeline (runs entirely in the renderer):
+ *   0. Read the separation model selected on the Config screen and reject
+ *      WebGPU-only models up front when WebGPU is unavailable.
  *   1. Decode the original video's audio track via the Web Audio API.
  *   2. Resample to 44.1 kHz for unblend.
- *   3. Stem-separate with htdemucs; recombine drums+bass+other (drop vocals).
+ *   3. Stem-separate with the selected model; recombine every stem except
+ *      vocals (drop vocals).
  *   4. Re-mux with mediabunny: copy original video packets + AAC-encode the
  *      new audio into a brand-new MP4 file. The original is never modified.
  */
@@ -20,7 +23,10 @@ import {
   Quality,
 } from 'mediabunny';
 import { MODEL_ARTIFACTS } from 'unblend';
+import type { ModelType } from 'unblend';
 import { decodeAudio, resampleTo44100, separateAndRecombine } from './stems';
+import { getSeparationModelInfo, formatBytes } from './models';
+import { detectAcceleration } from './accel';
 
 /** Progress callback for the full pipeline. */
 export interface PipelineProgress {
@@ -44,6 +50,30 @@ export async function generateLyricless(
   videoBytes: ArrayBuffer,
   onProgress?: (p: PipelineProgress) => void,
 ): Promise<ArrayBuffer> {
+  // -----------------------------------------------------------------------
+  // Stage 0: Resolve the model chosen on the Config screen.
+  // -----------------------------------------------------------------------
+  const settings = await window.kara.settings();
+  const model = settings.separationModel as ModelType;
+  const modelInfo = getSeparationModelInfo(model);
+  if (!modelInfo) {
+    throw new Error(`Unknown separation model '${settings.separationModel}'.`);
+  }
+
+  // WebGPU-only models (their fp16 graph exceeds the WASM heap) must be
+  // rejected before we spend time decoding and downloading hundreds of MB
+  // that could never run. Other models let unblend fall back to WASM itself.
+  if (modelInfo.webgpuRequired) {
+    const accel = await detectAcceleration();
+    if (accel.mode !== 'webgpu') {
+      throw new Error(
+        `The ${modelInfo.label} model requires WebGPU, which is unavailable ` +
+          `on this machine (${accel.reason || 'no WebGPU adapter'}). ` +
+          'Pick a different model on the Config screen.',
+      );
+    }
+  }
+
   const blob = new Blob([videoBytes], { type: 'video/mp4' });
 
   // -----------------------------------------------------------------------
@@ -69,27 +99,36 @@ export async function generateLyricless(
   // -----------------------------------------------------------------------
   const resampled = await resampleTo44100(decodedBuffer);
 
-  // Ensure the model is cached locally (first run downloads ~85 MB from
+  // Ensure the selected model is cached locally (first run downloads it from
   // HuggingFace; subsequent runs load from disk). The artifact URL and
   // expected size come from the installed unblend package, so the cached
   // file always matches the artifact Separator.load expects — its metadata
   // check rejects exports from older HF revisions, and a size mismatch also
   // catches truncated downloads.
   onProgress?.({ stage: 'separate', fraction: 0, label: 'Checking model…' });
-  const artifact = MODEL_ARTIFACTS.htdemucs.fp16;
-  const status = await window.kara.modelStatus();
+  const artifact = MODEL_ARTIFACTS[model].fp16;
+  const status = await window.kara.modelStatus(model);
   if (!status.cached || status.size !== artifact.sizeBytes) {
-    onProgress?.({ stage: 'separate', fraction: 0.05, label: 'Downloading model (first run)…' });
+    onProgress?.({
+      stage: 'separate',
+      fraction: 0.05,
+      label: `Downloading ${modelInfo.label} model (first run, ${formatBytes(artifact.sizeBytes)})…`,
+    });
     const resp = await fetch(artifact.url);
     if (!resp.ok) throw new Error(`Model download failed: HTTP ${resp.status}`);
     const modelBytes = await resp.arrayBuffer();
-    await window.kara.saveModel(modelBytes);
+    await window.kara.saveModel(model, modelBytes);
   }
 
-  onProgress?.({ stage: 'separate', fraction: 0.1, label: 'Separating stems…' });
+  onProgress?.({
+    stage: 'separate',
+    fraction: 0.1,
+    label: `Separating stems (${modelInfo.label})…`,
+  });
 
   const { interleaved, numSamples, separator } = await separateAndRecombine(
     resampled,
+    model,
     (p) => {
       onProgress?.({
         stage: 'separate',
@@ -197,7 +236,7 @@ export async function generateLyricless(
   const lyriclessBytes = target.buffer;
 
   // Clean up the separator (frees ONNX session + workers).
-  await separator.unload().catch(() => {});
+  await separator.unload().catch(() => undefined);
 
   onProgress?.({ stage: 'mux', fraction: 1, label: 'Done' });
 

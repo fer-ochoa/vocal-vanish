@@ -43,6 +43,12 @@ export interface DownloadProgress {
   total: number | null;
 }
 
+/** Persisted app settings (mirrors AppSettings in src/index.ts). */
+export interface AppSettings {
+  /** unblend model id used to generate lyricless videos. */
+  separationModel: string;
+}
+
 /**
  * The only surface the renderer can use. Everything is a narrow, promise-based
  * API over ipcRenderer — no raw Node or Electron access leaks through.
@@ -124,17 +130,25 @@ const api = {
   lyriclessStatus(kid: string): Promise<LyriclessStatus> {
     return ipcRenderer.invoke('kara:lyricless-status', kid);
   },
-  /** Check whether the htdemucs model is cached locally. */
-  modelStatus(): Promise<{ cached: boolean; size?: number }> {
-    return ipcRenderer.invoke('kara:model-status');
+  /** Read the persisted app settings (Config screen). */
+  settings(): Promise<AppSettings> {
+    return ipcRenderer.invoke('kara:settings');
   },
-  /** Stream the cached model file to the renderer (returns ArrayBuffer). */
-  openModelStream(): Promise<ArrayBuffer> {
+  /** Persist the separation model chosen on the Config screen. */
+  setSeparationModel(model: string): Promise<AppSettings> {
+    return ipcRenderer.invoke('kara:set-separation-model', model);
+  },
+  /** Check whether a model's fp16 artifact is cached locally. */
+  modelStatus(model: string): Promise<{ cached: boolean; size?: number }> {
+    return ipcRenderer.invoke('kara:model-status', model);
+  },
+  /** Stream a cached model file to the renderer (returns ArrayBuffer). */
+  openModelStream(model: string): Promise<ArrayBuffer> {
     const channel = 'kara:model-data';
     return new Promise((resolve, reject) => {
       const chunks: Uint8Array[] = [];
       let total = 0;
-      ipcRenderer.send('kara:model-stream');
+      ipcRenderer.send('kara:model-stream', model);
       const onData = (_e: unknown, msg: any): void => {
         if (msg && msg.ok === false) {
           cleanup();
@@ -165,9 +179,9 @@ const api = {
       ipcRenderer.on(channel, onData);
     });
   },
-  /** Save the model file to disk (called after first download). */
-  saveModel(data: ArrayBuffer): Promise<void> {
-    return ipcRenderer.invoke('kara:save-model', data);
+  /** Save a model file to disk (called after first download). */
+  saveModel(model: string, data: ArrayBuffer): Promise<void> {
+    return ipcRenderer.invoke('kara:save-model', model, data);
   },
   onDownloadProgress(callback: (p: DownloadProgress) => void): () => void {
     const listener = (_e: unknown, p: DownloadProgress): void => callback(p);
