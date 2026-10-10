@@ -32,10 +32,20 @@
             <div class="row-sub">
               <span v-if="row.series" class="tag">{{ row.series }}</span>
               <span v-if="row.singer" class="tag tag-dim">{{ row.singer }}</span>
+              <span v-for="lang in row.langs || []" :key="lang" class="tag tag-lang" title="Song language">{{ lang }}</span>
+              <span v-if="row.offVocal" class="tag tag-offvocal" title="This version is already instrumental">Off Vocal</span>
               <span v-if="row.duration" class="dur">{{ fmtDuration(row.duration) }}</span>
             </div>
           </div>
-          <button class="btn btn-primary" @click="startDownload(row.kid)">Download</button>
+          <button
+            class="btn"
+            :class="row.downloaded ? 'btn-downloaded' : 'btn-primary'"
+            :disabled="row.downloaded"
+            :title="row.downloaded ? 'Already in your catalog' : 'Download this song'"
+            @click="startDownload(row.kid)"
+          >
+            {{ row.downloaded ? 'Downloaded' : 'Download' }}
+          </button>
         </li>
       </ul>
       <p v-else class="muted">No songs found.</p>
@@ -121,7 +131,8 @@ let offProgress: (() => void) | null = null;
 
 async function startDownload(kid: string): Promise<void> {
   const row = rows.value.find((r) => r.kid === kid);
-  downloadTitle.value = row?.title || kid;
+  if (!row || row.downloaded) return; // already in the catalog
+  downloadTitle.value = row.title || kid;
   downloaded.received = 0;
   downloaded.total = row?.size ?? null;
   downloading.value = true;
@@ -136,6 +147,8 @@ async function startDownload(kid: string): Promise<void> {
 
   try {
     await window.kara.download(kid);
+    // Reflect ownership immediately so the button greys out without re-searching.
+    row.downloaded = true;
   } catch (e) {
     error.value = (e as Error).message || 'Download failed';
   } finally {

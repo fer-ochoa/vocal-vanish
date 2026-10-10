@@ -17,16 +17,26 @@
           <div class="row-sub">
             <span v-if="entry.series" class="tag">{{ entry.series }}</span>
             <span v-if="entry.singer" class="tag tag-dim">{{ entry.singer }}</span>
+            <span v-for="lang in entry.langs || []" :key="lang" class="tag tag-lang" title="Song language">{{ lang }}</span>
+            <span v-if="entry.offVocal" class="tag tag-offvocal" title="This version is already instrumental">Off Vocal</span>
             <span v-if="entry.duration" class="dur">{{ fmtDuration(entry.duration) }}</span>
             <span v-if="entry.lyriclessFile" class="tag tag-accent">Lyricless</span>
           </div>
         </div>
         <div class="row-actions">
-          <button class="btn btn-primary" @click="play(entry.kid)">Play</button>
           <button
             class="btn"
+            :class="playButtonClass(entry)"
+            :title="playButtonTitle(entry)"
+            @click="play(entry.kid)"
+          >
+            Play
+          </button>
+          <button
+            v-if="canGenerateLyricless(entry)"
+            class="btn"
             :disabled="processing !== null"
-            :title="entry.lyriclessFile ? 'Regenerate lyricless version' : 'Generate lyricless version'"
+            title="Generate lyricless version"
             @click="startLyricless(entry)"
           >
             Lyricless
@@ -79,7 +89,45 @@ async function load(): Promise<void> {
     loaded.value = true;
   } catch (e) {
     error.value = (e as Error).message || 'Failed to load catalog';
+    return;
   }
+  // Entries downloaded before the langs/offVocal fields existed are filled in
+  // in the background; the list re-renders when they arrive.
+  try {
+    const updated = await window.kara.backfillCatalogMetadata();
+    mergeEntries(updated);
+  } catch {
+    /* offline or API gone — rows just render without the extra chips */
+  }
+}
+
+/** Replace stale rows with freshly resolved copies, keeping the list order. */
+function mergeEntries(updated: any[]): void {
+  if (!updated?.length) return;
+  const byKid = new Map(updated.map((e) => [e.kid, e]));
+  entries.value = entries.value.map((e) => byKid.get(e.kid) || e);
+}
+
+// --- Row state helpers ----------------------------------------------------
+// An off-vocal song is already instrumental, and a song that already has a
+// lyricless file needs no second pass: in both cases the Lyricless action is
+// hidden.
+function canGenerateLyricless(entry: any): boolean {
+  return !entry.lyriclessFile && !entry.offVocal;
+}
+
+function playButtonClass(entry: any): string {
+  if (entry.offVocal) return 'btn-offvocal';
+  // Already processed -> accent blue, matching the Lyricless chip on the row.
+  if (entry.lyriclessFile) return 'btn-primary';
+  // Plain song -> default neutral button, like the Lyricless one next to it.
+  return '';
+}
+
+function playButtonTitle(entry: any): string {
+  if (entry.offVocal) return 'Play (off vocal version)';
+  if (entry.lyriclessFile) return 'Play (lyricless version available)';
+  return 'Play';
 }
 
 const shown = computed(() => {

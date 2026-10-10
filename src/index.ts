@@ -41,6 +41,13 @@ export interface LyricsInfo {
   filename?: string;
 }
 
+/**
+ * TID of the "Off Vocal" *version* tag in the Kara moe database. Kara moe
+ * models an instrumental as its own song whose `versions` tags include this
+ * one (it is not a `songtypes` value), e.g. "… ~ Off Vocal Vers".
+ */
+const OFF_VOCAL_TID = "c0cc87b9-55b9-40f0-878a-fbb9e34c151e";
+
 /** A song as returned by the Kara moe API (search + single-song endpoints). */
 export interface Song {
   kid: string;
@@ -56,6 +63,7 @@ export interface Song {
   singers?: TagRef[];
   songtypes?: TagRef[];
   langs?: TagRef[];
+  versions?: TagRef[];
   lyrics_infos?: LyricsInfo[];
 }
 
@@ -75,6 +83,11 @@ export interface CatalogEntry {
   size: number | null; // bytes
   downloadedAt: string; // ISO date
   lyriclessFile?: string | null; // filename of the lyricless variant, if generated
+  /** Language codes of the song, e.g. ["JPN"]. Absent on entries downloaded
+   *  before this field existed — backfilled lazily by `kara:catalog-backfill`. */
+  langs?: string[];
+  /** True when the song's version is "Off Vocal" (already instrumental). */
+  offVocal?: boolean;
 }
 
 /** A row shown in the search results list. */
@@ -85,6 +98,12 @@ export interface SearchRow {
   singer: string;
   duration: number | null;
   size: number | null;
+  /** Language codes of the song, e.g. ["JPN"]. */
+  langs: string[];
+  /** True when the song's version is "Off Vocal" (already instrumental). */
+  offVocal: boolean;
+  /** True when this kid is already present in the local catalog. */
+  downloaded: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +134,34 @@ function writeIndex(index: Record<string, CatalogEntry>): void {
   fs.writeFileSync(CATALOG_INDEX_FILE(), JSON.stringify(index, null, 2));
 }
 
-function songToRow(song: Song): SearchRow {
+/**
+ * Display codes for a song's languages, e.g. ["JPN"]. The API exposes both a
+ * `short` ("JPN") and a `name` ("jpn") on each language tag; we prefer the
+ * short form and fall back to the uppercased name.
+ */
+function languageCodes(song: Song): string[] {
+  return (song.langs || [])
+    .map((l) => (l.short || l.name || "").trim().toUpperCase())
+    .filter(Boolean);
+}
+
+/** Collapse a tag name for comparison: "Off Vocal" -> "offvocal". */
+function normalizeTagName(name?: string | null): string {
+  return (name || "").toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+/**
+ * True when the song is an off-vocal (instrumental) version. Matched on the
+ * known "Off Vocal" version TID, with a name match as a safety net in case the
+ * upstream tag is ever re-keyed.
+ */
+function isOffVocal(song: Song): boolean {
+  return (song.versions || []).some(
+    (v) => v.tid === OFF_VOCAL_TID || normalizeTagName(v.name) === "offvocal",
+  );
+}
+
+function songToRow(song: Song, downloadedKids?: Set<string>): SearchRow {
   const title =
     (song.titles_default_language &&
       song.titles[song.titles_default_language]) ||
@@ -129,6 +175,9 @@ function songToRow(song: Song): SearchRow {
     singer: song.singers?.map((s) => s.name).join(", ") || "",
     duration: song.duration ?? null,
     size: song.mediasize ?? null,
+    langs: languageCodes(song),
+    offVocal: isOffVocal(song),
+    downloaded: downloadedKids?.has(song.kid) ?? false,
   };
 }
 
@@ -258,9 +307,11 @@ function registerIpc(): void {
       url.searchParams.set("from", String(params.from));
       url.searchParams.set("size", String(params.size));
       const data = await httpGetJson<SearchResponse>(url.toString());
+      // One index read per search so each row can flag songs you already own.
+      const downloadedKids = new Set(Object.keys(readIndex()));
       return {
         count: data.infos?.count ?? 0,
-        rows: (data.content || []).map(songToRow),
+        rows: (data.content || []).map((song) => songToRow(song, downloadedKids)),
       };
     },
   );
@@ -271,6 +322,44 @@ function registerIpc(): void {
     return Object.values(index).sort((a, b) =>
       b.downloadedAt.localeCompare(a.downloadedAt),
     );
+  });
+
+  // Backfill the `langs` / `offVocal` fields for catalog entries written by
+  // older versions of the app (they were not stored at download time). Only
+  // entries that are missing them hit the API, and the results are persisted so
+  // this runs at most once per song. Returns the updated entries so the
+  // renderer can merge them into the list it already rendered; entries that
+  // could not be resolved (offline, song removed upstream) are skipped.
+  ipcMain.handle("kara:catalog-backfill", async (): Promise<CatalogEntry[]> => {
+    const index = readIndex();
+    const pending = Object.values(index).filter(
+      (entry) => entry.langs === undefined || entry.offVocal === undefined,
+    );
+    if (!pending.length) return [];
+
+    const updated: CatalogEntry[] = [];
+    // Small concurrency cap so a big catalog doesn't hammer the API.
+    const CONCURRENCY = 5;
+    for (let i = 0; i < pending.length; i += CONCURRENCY) {
+      await Promise.all(
+        pending.slice(i, i + CONCURRENCY).map(async (entry) => {
+          try {
+            const song = await httpGetJson<Song>(
+              `${API_BASE}/karas/${encodeURIComponent(entry.kid)}`,
+            );
+            if (!song || !song.kid) return;
+            entry.langs = languageCodes(song);
+            entry.offVocal = isOffVocal(song);
+            updated.push(entry);
+          } catch {
+            /* leave the entry untouched; the UI just shows no chips for it */
+          }
+        }),
+      );
+    }
+
+    if (updated.length) writeIndex(index);
+    return updated;
   });
 
   // Download a song's hardsub video into the local catalog.
@@ -318,6 +407,8 @@ function registerIpc(): void {
         file: fileName,
         size: row.size,
         downloadedAt: new Date().toISOString(),
+        langs: languageCodes(song),
+        offVocal: isOffVocal(song),
       };
       index[song.kid] = entry;
       writeIndex(index);

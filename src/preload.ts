@@ -8,6 +8,12 @@ export interface SearchRow {
   singer: string;
   duration: number | null;
   size: number | null;
+  /** Language codes of the song, e.g. ['JPN']. */
+  langs: string[];
+  /** True when the song's version is 'Off Vocal' (already instrumental). */
+  offVocal: boolean;
+  /** True when this kid is already present in the local catalog. */
+  downloaded: boolean;
 }
 
 export interface CatalogEntry {
@@ -20,6 +26,10 @@ export interface CatalogEntry {
   size: number | null;
   downloadedAt: string;
   lyriclessFile?: string | null;
+  /** Language codes of the song, e.g. ['JPN']. Undefined until backfilled. */
+  langs?: string[];
+  /** True when the song's version is 'Off Vocal' (already instrumental). */
+  offVocal?: boolean;
 }
 
 export interface LyriclessStatus {
@@ -43,6 +53,15 @@ const api = {
   },
   catalog(): Promise<CatalogEntry[]> {
     return ipcRenderer.invoke('kara:catalog');
+  },
+  /**
+   * Fill in `langs` / `offVocal` for catalog entries downloaded before those
+   * fields existed. Resolves with only the entries that were updated (empty
+   * array when nothing needed backfilling), so the caller can merge them into
+   * the list it already has.
+   */
+  backfillCatalogMetadata(): Promise<CatalogEntry[]> {
+    return ipcRenderer.invoke('kara:catalog-backfill');
   },
   download(kid: string): Promise<CatalogEntry> {
     return ipcRenderer.invoke('kara:download', kid);

@@ -7,6 +7,8 @@
   --muted: #8b95a3;
   --accent: #4f8cff;
   --accent-2: #3b6fd6;
+  --green: #2ea043;
+  --green-2: #26873a;
 }
 
 * {
@@ -191,6 +193,30 @@ body {
   color: var(--text);
 }
 
+/* Off-vocal songs: green action button (the version is already instrumental). */
+.btn-offvocal {
+  background: var(--green);
+  border-color: var(--green-2);
+  color: #fff;
+}
+
+.btn-offvocal:hover {
+  background: var(--green-2);
+}
+
+/* Download button for a song that is already in the local catalog. */
+.btn-downloaded,
+.btn-downloaded:hover {
+  background: var(--panel-2);
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+.btn-downloaded:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* --- Results list -------------------------------------------------------- */
 .list {
   list-style: none;
@@ -242,6 +268,24 @@ body {
 
 .tag-dim {
   color: var(--muted);
+}
+
+/* Language chip (e.g. "JPN"), shown to the right of the singer. */
+.tag-lang {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  padding: 2px 7px;
+}
+
+/* Off-vocal chip: green, because the version is already instrumental. */
+.tag-offvocal {
+  background: var(--green);
+  color: #fff;
 }
 
 .dur {
@@ -323,6 +367,12 @@ body {
 .player-screen {
   display: flex;
   flex-direction: column;
+}
+
+.player-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .video-wrap {
