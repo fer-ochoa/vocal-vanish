@@ -6,7 +6,7 @@
  * back into a single interleaved-stereo Float32Array.
  */
 
-import { Separator } from "unblend";
+import { Separator, MODEL_ARTIFACTS } from "unblend";
 
 /** Progress callback for the stem separation stage. */
 export interface StemProgress {
@@ -80,10 +80,13 @@ export async function separateAndRecombine(
   // so 'ort/' resolves correctly relative to document.baseURI.
   const ortWasmDir = new URL("ort/", document.baseURI).href;
 
-  // Check if the model is cached locally (avoids re-downloading ~91 MB).
+  // Check if the model is cached locally (avoids re-downloading ~85 MB).
+  // A size mismatch means the cached file is stale (an export from an older
+  // unblend revision, which the metadata check would reject) or truncated;
+  // ignore it and let unblend fetch its own registered artifact instead.
   let modelUrl: string | undefined;
   const status = await window.kara.modelStatus();
-  if (status.cached) {
+  if (status.cached && status.size === MODEL_ARTIFACTS.htdemucs.fp16.sizeBytes) {
     const buf = await window.kara.openModelStream();
     modelUrl = URL.createObjectURL(
       new Blob([buf], { type: "application/octet-stream" }),

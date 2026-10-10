@@ -19,6 +19,7 @@ import {
   AudioSample,
   Quality,
 } from 'mediabunny';
+import { MODEL_ARTIFACTS } from 'unblend';
 import { decodeAudio, resampleTo44100, separateAndRecombine } from './stems';
 
 /** Progress callback for the full pipeline. */
@@ -68,15 +69,18 @@ export async function generateLyricless(
   // -----------------------------------------------------------------------
   const resampled = await resampleTo44100(decodedBuffer);
 
-  // Ensure the model is cached locally (first run downloads ~91 MB from
-  // HuggingFace; subsequent runs load from disk).
+  // Ensure the model is cached locally (first run downloads ~85 MB from
+  // HuggingFace; subsequent runs load from disk). The artifact URL and
+  // expected size come from the installed unblend package, so the cached
+  // file always matches the artifact Separator.load expects — its metadata
+  // check rejects exports from older HF revisions, and a size mismatch also
+  // catches truncated downloads.
   onProgress?.({ stage: 'separate', fraction: 0, label: 'Checking model…' });
+  const artifact = MODEL_ARTIFACTS.htdemucs.fp16;
   const status = await window.kara.modelStatus();
-  if (!status.cached) {
+  if (!status.cached || status.size !== artifact.sizeBytes) {
     onProgress?.({ stage: 'separate', fraction: 0.05, label: 'Downloading model (first run)…' });
-    const MODEL_URL =
-      'https://huggingface.co/Ryan5453/unblend/resolve/eda32466a76dc81c5e66af6577dbc20fb219e959/htdemucs_fp16.onnx';
-    const resp = await fetch(MODEL_URL);
+    const resp = await fetch(artifact.url);
     if (!resp.ok) throw new Error(`Model download failed: HTTP ${resp.status}`);
     const modelBytes = await resp.arrayBuffer();
     await window.kara.saveModel(modelBytes);

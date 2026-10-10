@@ -436,8 +436,10 @@ function registerIpc(): void {
   });
 
   // Check whether the htdemucs model is cached locally. The renderer calls
-  // this before loading the separator; if the file exists, it creates a blob:
-  // URL and passes it as `modelUrl` to unblend (skipping the ~91 MB download).
+  // this before loading the separator; if the file exists (with the exact
+  // size the installed unblend package expects for its artifact), it creates
+  // a blob: URL and passes it as `modelUrl` to unblend (skipping the ~85 MB
+  // download).
   ipcMain.handle("kara:model-status", async () => {
     const modelPath = path.join(app.getPath("userData"), "htdemucs_fp16.onnx");
     if (!fs.existsSync(modelPath)) return { cached: false };

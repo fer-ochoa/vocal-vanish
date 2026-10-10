@@ -45,7 +45,7 @@
     "electron-squirrel-startup": "^1.0.1",
     "mediabunny": "^1.55.5",
     "onnxruntime-web": "^1.26.0",
-    "unblend": "file:unblend-1.0.0.tgz",
+    "unblend": "^1.0.0",
     "video.js": "^8.24.0",
     "vue": "^3.5.42",
     "vue-router": "^4.6.4"

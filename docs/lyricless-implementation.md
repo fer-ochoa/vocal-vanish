@@ -37,8 +37,8 @@ write new MP4 ────IPC────────►   atomic write <kid>.ly
 
 ## Stem separation (unblend)
 
-- **Library:** [unblend](https://github.com/Ryan5453/unblend) v1.0.0, pinned via a local tarball (`unblend-1.0.0.tgz` at repo root, installed as `"unblend": "file:unblend-1.0.0.tgz"`).
-- **Model:** htdemucs fp16 (~91 MB ONNX), fetched from HuggingFace on first use and cached in `userData/htdemucs_fp16.onnx`. Subsequent runs load from disk via IPC (no re-download).
+- **Library:** [unblend](https://github.com/Ryan5453/unblend) v1.0.0, installed from npm (`"unblend": "^1.0.0"`).
+- **Model:** htdemucs fp16 (~85 MB ONNX), fetched from the HuggingFace artifact registered in the installed unblend package (`MODEL_ARTIFACTS`) on first use and cached in `userData/htdemucs_fp16.onnx`. Subsequent runs load from disk via IPC (no re-download); the cache is only used when its size matches the registered artifact, so stale exports from older unblend revisions are re-downloaded automatically.
 - **Backend:** WebGPU preferred, automatic WASM fallback. ORT wasm sidecars are copied to `main_window/ort/` by CopyWebpackPlugin; the directory URL is passed as `wasmPaths`.
 - **Output:** htdemucs produces 4 interleaved-stereo stems (drums, bass, other, vocals). We sum drums + bass + other and clamp to [-1, 1].
 
