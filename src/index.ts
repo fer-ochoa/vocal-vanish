@@ -17,7 +17,10 @@ if (require("electron-squirrel-startup")) {
 
 app.commandLine.appendSwitch("enable-unsafe-webgpu");
 
-app.commandLine.appendSwitch("enable-features", "ForceEnableWebGpuInterop");
+app.commandLine.appendSwitch(
+  "enable-features",
+  "Vulkan,ForceEnableWebGpuInterop",
+);
 
 //app.commandLine.appendSwitch("force_high_performance_gpu");
 

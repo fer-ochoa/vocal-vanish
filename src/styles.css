@@ -300,13 +300,76 @@ body {
   flex-shrink: 0;
 }
 
-/* --- Pager ---------------------------------------------------------------- */
-.pager {
+/* --- List footer (page size + pagination) --------------------------------- */
+/* Pinned to the bottom of the scrolling content area so the page controls are
+   always reachable, and stretched edge-to-edge across the content padding. */
+.list-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 14px;
-  margin-top: 20px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin: 20px -30px 0;
+  padding: 12px 30px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+}
+
+/* Drop the content bottom padding under a footer so it sits flush with the
+   bottom edge instead of leaving a gap when fully scrolled. */
+.content:has(.list-footer) {
+  padding-bottom: 0;
+}
+
+.footer-side {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.footer-size {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.footer-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.page-size {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: 13px;
+}
+
+.page-size:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.footer-note {
+  white-space: nowrap;
+}
+
+.page-indicator {
+  font-size: 13px;
+  min-width: 96px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.btn-page {
+  min-width: 34px;
+  padding: 7px 10px;
+  line-height: 1;
 }
 
 /* --- Download overlay ----------------------------------------------------- */

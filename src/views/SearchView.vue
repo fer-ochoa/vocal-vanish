@@ -50,12 +50,17 @@
       </ul>
       <p v-else class="muted">No songs found.</p>
 
-      <!-- Pagination -->
-      <div class="pager">
-        <button class="btn" :disabled="from === 0 || loading" @click="runSearch(from - SIZE)">‹ Prev</button>
-        <span class="muted small">{{ from + 1 }}–{{ Math.min(from + rows.length, count) }} of {{ count }}</span>
-        <button class="btn" :disabled="from + rows.length >= count || loading" @click="runSearch(from + SIZE)">Next ›</button>
-      </div>
+      <!-- Footer: page size + page navigation -->
+      <ListFooter
+        v-if="rows.length"
+        :sizes="PAGE_SIZES"
+        :size="size"
+        :total="count"
+        :page="page"
+        :disabled="loading"
+        @update:size="changeSize"
+        @update:page="goPage"
+      />
     </div>
 
     <!-- Download progress overlay -->
@@ -79,17 +84,24 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref } from 'vue';
+import ListFooter from '../components/ListFooter.vue';
 
-const SIZE = 25;
+// Page sizes offered in the footer dropdown. The kara.moe search endpoint
+// happily serves large pages, so the list can be browsed a chunk at a time.
+const PAGE_SIZES = [10, 25, 50, 100, 250];
 
 const query = ref('');
 const criterion = ref<'text' | 'year' | 'kid'>('text');
 const rows = ref<any[]>([]);
 const count = ref(0);
 const from = ref(0);
+const size = ref(25);
 const searched = ref(false);
 const loading = ref(false);
 const error = ref('');
+
+// 1-based page derived from the API offset.
+const page = computed(() => Math.floor(from.value / size.value) + 1);
 
 const placeholder = computed(() => {
   if (criterion.value === 'year') return 'e.g. 2019';
@@ -111,7 +123,7 @@ async function runSearch(startFrom: number): Promise<void> {
   error.value = '';
   const q = buildQuery();
   try {
-    const res = await window.kara.search({ query: q, from: startFrom, size: SIZE, mode: criterion.value });
+    const res = await window.kara.search({ query: q, from: startFrom, size: size.value, mode: criterion.value });
     rows.value = res.rows;
     count.value = res.count;
     from.value = startFrom;
@@ -121,6 +133,23 @@ async function runSearch(startFrom: number): Promise<void> {
   } finally {
     loading.value = false;
   }
+}
+
+function goPage(target: number): void {
+  if (loading.value) return;
+  const start = (target - 1) * size.value;
+  if (start === from.value) return;
+  void runSearch(start);
+}
+
+// Changing the page size keeps the first row you were looking at: the current
+// offset is snapped to the new page grid and clamped to the last page.
+function changeSize(next: number): void {
+  if (next === size.value) return;
+  size.value = next;
+  const lastPageStart = Math.max(0, (Math.ceil(count.value / next) - 1) * next);
+  const start = Math.min(Math.floor(from.value / next) * next, lastPageStart);
+  void runSearch(start);
 }
 
 // --- Download flow -------------------------------------------------------

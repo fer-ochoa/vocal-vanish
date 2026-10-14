@@ -11,7 +11,7 @@
     </div>
 
     <ul v-if="shown.length" class="list">
-      <li v-for="entry in shown" :key="entry.kid" class="row">
+      <li v-for="entry in paged" :key="entry.kid" class="row">
         <div class="row-main">
           <div class="row-title">{{ entry.title }}</div>
           <div class="row-sub">
@@ -47,6 +47,17 @@
     </ul>
     <p v-else-if="loaded" class="muted">Nothing here yet. Download some songs from the Search screen.</p>
 
+    <!-- Footer: page size + page navigation -->
+    <ListFooter
+      v-if="shown.length"
+      :sizes="PAGE_SIZES"
+      :size="size"
+      :total="shown.length"
+      :page="page"
+      @update:size="changeSize"
+      @update:page="goPage"
+    />
+
     <!-- Lyricless progress overlay -->
     <transition name="fade">
       <div v-if="processing !== null" class="overlay">
@@ -67,8 +78,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
+import ListFooter from '../components/ListFooter.vue';
 import { generateLyricless } from '../lyricless/pipeline';
 
 const router = useRouter();
@@ -76,6 +88,11 @@ const entries = ref<any[]>([]);
 const filter = ref('');
 const loaded = ref(false);
 const error = ref('');
+
+// --- Pagination ------------------------------------------------------------
+const PAGE_SIZES = [10, 25, 50, 100, 250];
+const size = ref(25);
+const page = ref(1); // 1-based
 
 // --- Lyricless generation state -------------------------------------------
 const processing = ref<string | null>(null); // kid being processed, or null
@@ -139,6 +156,35 @@ const shown = computed(() => {
       e.series.toLowerCase().includes(f) ||
       e.singer.toLowerCase().includes(f),
   );
+});
+
+const totalPages = computed(() => Math.max(1, Math.ceil(shown.value.length / size.value)));
+
+// The slice of the filtered list rendered on the current page.
+const paged = computed(() => {
+  const start = (page.value - 1) * size.value;
+  return shown.value.slice(start, start + size.value);
+});
+
+function goPage(target: number): void {
+  page.value = Math.min(Math.max(1, target), totalPages.value);
+}
+
+// Changing the page size keeps the first row you were looking at, snapped to
+// the new page grid and clamped to the last page.
+function changeSize(next: number): void {
+  const firstVisible = (page.value - 1) * size.value;
+  size.value = next;
+  page.value = Math.min(Math.floor(firstVisible / next) + 1, totalPages.value);
+}
+
+// A new filter starts from the first page; deleting rows (or shrinking the
+// page size) can leave the current page past the end, so pull it back.
+watch(filter, () => {
+  page.value = 1;
+});
+watch([() => shown.value.length, size], () => {
+  if (page.value > totalPages.value) page.value = totalPages.value;
 });
 
 function play(kid: string): void {
