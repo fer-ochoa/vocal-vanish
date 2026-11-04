@@ -313,6 +313,32 @@ export function removeSongFromCollection(collectionId: string, kid: string): voi
     )
     .run();
 }
+/**
+ * Reorder the songs in a collection. Deletes all membership rows and
+ * reinserts them in the given order. Bumps `updatedAt`; bumps
+ * `lastSyncedAt` only for non-local collections (a purely local reorder
+ * is not a "sync").
+ */
+export function reorderCollection(collectionId: string, orderedKids: string[]): void {
+  const col = db.select().from(collections).where(eq(collections.id, collectionId)).get();
+  if (!col) return;
+  const now = new Date().toISOString();
+  db.transaction((tx) => {
+    tx.delete(collectionSongs)
+      .where(eq(collectionSongs.collectionId, collectionId))
+      .run();
+    orderedKids.forEach((kid, position) => {
+      tx.insert(collectionSongs)
+        .values({ collectionId, kid, position })
+        .run();
+    });
+    const set: Record<string, unknown> = { updatedAt: now };
+    if (col.source !== "local") {
+      set.lastSyncedAt = now;
+    }
+    tx.update(collections).set(set).where(eq(collections.id, collectionId)).run();
+  });
+}
 
 /** Collections a given song belongs to (id + name). */
 export function collectionsForSong(kid: string): { id: string; name: string }[] {

@@ -21,6 +21,7 @@ import {
   getCollectionSongs,
   addSongToCollection,
   removeSongFromCollection,
+  reorderCollection,
   collectionsForSong,
 } from "./db/queries";
 import { runLegacyImport } from "./db/legacy-import";
@@ -855,6 +856,12 @@ function registerIpc(): void {
     "kara:collection-remove-song",
     async (_e, collectionId: string, kid: string) => {
       removeSongFromCollection(collectionId, kid);
+    },
+  );
+  ipcMain.handle(
+    "kara:collection-reorder",
+    async (_e, collectionId: string, orderedKids: string[]) => {
+      reorderCollection(collectionId, orderedKids);
     },
   );
 

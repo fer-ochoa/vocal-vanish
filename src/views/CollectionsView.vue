@@ -4,7 +4,6 @@
       <h1>Collections</h1>
       <p class="muted">Your local collections of downloaded songs.</p>
     </header>
-
     <!-- New collection -->
     <div class="new-collection">
       <input
@@ -18,10 +17,14 @@
         {{ busy ? '…' : 'Create' }}
       </button>
     </div>
-
     <!-- Collection list -->
     <ul v-if="collections.length" class="list">
-      <li v-for="col in collections" :key="col.id" class="row">
+      <li
+        v-for="col in collections"
+        :key="col.id"
+        class="row"
+        @click="openDetail(col.id)"
+      >
         <div class="row-main">
           <!-- Normal display -->
           <template v-if="renamingId !== col.id">
@@ -47,38 +50,39 @@
             v-if="renamingId !== col.id"
             class="btn btn-ghost"
             title="Rename"
-            @click="startRename(col)"
+            @click.stop="startRename(col)"
           >
             Rename
           </button>
           <template v-else>
-            <button class="btn btn-ghost" title="Save" @click="confirmRename(col.id)">✓</button>
-            <button class="btn btn-ghost" title="Cancel" @click="cancelRename">✕</button>
+            <button class="btn btn-ghost" title="Save" @click.stop="confirmRename(col.id)">✓</button>
+            <button class="btn btn-ghost" title="Cancel" @click.stop="cancelRename">✕</button>
           </template>
-          <button class="btn btn-ghost" title="Delete" @click="remove(col.id, col.name)">✕</button>
+          <button class="btn btn-ghost" title="Delete" @click.stop="remove(col.id, col.name)">✕</button>
         </div>
       </li>
     </ul>
     <p v-else-if="loaded" class="muted">No collections yet. Create one above.</p>
-
     <!-- Error toast -->
     <transition name="fade">
       <div v-if="error" class="toast">{{ error }}</div>
     </transition>
   </div>
 </template>
-
 <script setup lang="ts">
 import { onMounted, ref, nextTick } from 'vue';
-
+import { useRouter } from 'vue-router';
+const router = useRouter();
 const collections = ref<any[]>([]);
 const loaded = ref(false);
 const busy = ref(false);
 const error = ref('');
-
+// --- Open detail (feat 05) -------------------------------------------------
+function openDetail(id: string): void {
+  router.push({ name: 'collection-detail', params: { id } });
+}
 // --- Create ----------------------------------------------------------------
 const newName = ref('');
-
 async function load(): Promise<void> {
   try {
     collections.value = await window.kara.collectionsList();
@@ -87,7 +91,6 @@ async function load(): Promise<void> {
     error.value = (e as Error).message || 'Failed to load collections';
   }
 }
-
 async function createCollection(): Promise<void> {
   if (!newName.value || busy.value) return;
   busy.value = true;
@@ -102,12 +105,10 @@ async function createCollection(): Promise<void> {
     busy.value = false;
   }
 }
-
 // --- Rename ----------------------------------------------------------------
 const renamingId = ref<string | null>(null);
 const renameValue = ref('');
 const renameInput = ref<HTMLInputElement | null>(null);
-
 function startRename(col: any): void {
   renamingId.value = col.id;
   renameValue.value = col.name;
@@ -116,12 +117,10 @@ function startRename(col: any): void {
     renameInput.value?.select();
   });
 }
-
 function cancelRename(): void {
   renamingId.value = null;
   renameValue.value = '';
 }
-
 async function confirmRename(id: string): Promise<void> {
   if (!renameValue.value) {
     cancelRename();
@@ -136,7 +135,6 @@ async function confirmRename(id: string): Promise<void> {
     cancelRename();
   }
 }
-
 // --- Delete ----------------------------------------------------------------
 async function remove(id: string, name: string): Promise<void> {
   if (!window.confirm(`Delete collection "${name}"? Its songs will not be deleted.`)) return;
@@ -147,13 +145,11 @@ async function remove(id: string, name: string): Promise<void> {
     error.value = (e as Error).message || 'Failed to delete collection';
   }
 }
-
 // --- Helpers ---------------------------------------------------------------
 function sourceBadgeClass(source: string): string {
   if (source === 'local') return 'tag-accent';
   if (source === 'remote-own') return 'tag-lang';
   return 'tag-dim';
 }
-
 onMounted(load);
 </script>

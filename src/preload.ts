@@ -240,6 +240,10 @@ const api = {
   collectionRemoveSong(collectionId: string, kid: string): Promise<void> {
     return ipcRenderer.invoke('kara:collection-remove-song', collectionId, kid);
   },
+  /** Reorder the songs in a collection (full ordered kid list). */
+  collectionReorder(collectionId: string, orderedKids: string[]): Promise<void> {
+    return ipcRenderer.invoke('kara:collection-reorder', collectionId, orderedKids);
+  },
   /** Get the songs in a collection, ordered by position. */
   collectionSongs(collectionId: string): Promise<CatalogEntry[]> {
     return ipcRenderer.invoke('kara:collection-songs', collectionId);

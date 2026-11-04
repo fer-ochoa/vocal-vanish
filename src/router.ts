@@ -2,6 +2,7 @@ import { createRouter, createWebHashHistory } from 'vue-router';
 import SearchView from './views/SearchView.vue';
 import CatalogView from './views/CatalogView.vue';
 import CollectionsView from './views/CollectionsView.vue';
+import CollectionDetailView from './views/CollectionDetailView.vue';
 import ConfigView from './views/ConfigView.vue';
 import PlayerView from './views/PlayerView.vue';
 
@@ -13,6 +14,7 @@ export default createRouter({
     { path: '/', name: 'search', component: SearchView },
     { path: '/catalog', name: 'catalog', component: CatalogView },
     { path: '/collections', name: 'collections', component: CollectionsView },
+    { path: '/collections/:id', name: 'collection-detail', component: CollectionDetailView, props: true },
     { path: '/config', name: 'config', component: ConfigView },
     { path: '/player/:kid', name: 'player', component: PlayerView, props: true },
   ],
