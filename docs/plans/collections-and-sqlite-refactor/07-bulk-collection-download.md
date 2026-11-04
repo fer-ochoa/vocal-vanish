@@ -2,9 +2,13 @@
 
 ## Goal
 
-Add a "Download all missing songs" action to a collection's detail view (feat 05), usable on the `remote-own` favorites collection introduced in feat 06 (and, for completeness, on any collection with non-downloaded members — though `local` collections can currently only contain already-downloaded songs per feat 04's "add from Catalog" flow, so in practice this matters for remote collections). Downloads proceed only for songs not already present in the local library, per the core requirement in the design doc: a song already downloaded standalone — or via a different collection — must never be re-downloaded.
+Add a "Download all missing songs" action to a collection's detail view (feat 05), usable on the `remote-own` playlists introduced in feat 06 (and, for completeness, on any collection with non-downloaded members — though `local` collections can currently only contain already-downloaded songs per feat 04's "add from Catalog" flow, so in practice this matters for remote collections). Downloads proceed only for songs not already present in the local library, per the core requirement in the design doc: a song already downloaded standalone — or via a different collection — must never be re-downloaded.
 
 Functional state after this feat: everything from feats 01–06 still works; the collection detail view gains a bulk-download affordance with its own progress reporting, reusing the existing single-song download machinery under the hood.
+
+## Prerequisite carried over from feat 06
+
+`collection_songs.kid` has a foreign key to `songs.kid`, so a `remote-own` collection **cannot** hold membership rows for songs that aren't downloaded yet. Feat 06 therefore persists the full ordered remote list separately (a `remote_playlist_items`-style table or a JSON snapshot column on `collections`) and only writes `collection_songs` rows for songs that already exist locally. This feat is where that gap closes: after each successful download, insert the `collection_songs` row (at the remote `position`) so the collection becomes a real, fully-populated membership set. Do not "fix" it by dropping the FK — the FK is what guarantees `collection_songs` never references a song with no files on disk.
 
 ## Reference
 
@@ -15,7 +19,7 @@ Design doc §1 ("if the user already has a song... and adds another collection i
 ### Add
 - `src/db/queries.ts`: expose `missingKidsForBulkDownload(remoteKids: string[]): string[]` exactly as design doc §3.6 (thin wrapper over `alreadyDownloadedKids`, already added in feat 01).
 - `src/index.ts`: `kara:collection-download` handle channel: `{collectionId}` →
-  1. Load the collection's current/target kid list (for `remote-own`, this is whatever `kara:collection-sync-favorites` from feat 06 last populated — re-sync first so the download reflects the latest favorites, or operate on the already-synced local `collection_songs` rows; **prefer re-syncing first** so a stale local copy doesn't silently skip new favorites).
+  1. Load the collection's target kid list (for a `remote-own` collection, this is the ordered list last persisted by `kara:collection-sync-remote-own` from feat 06 — re-sync first so the download reflects the current remote playlist, or operate on the already-persisted local snapshot; **prefer re-syncing first** so a stale local copy doesn't silently skip newly-added songs).
   2. Compute `missingKidsForBulkDownload`.
   3. For each missing kid, run the same fetch-metadata-then-stream-to-`tmp/`-then-move-into-`media/<kid>/` logic `kara:download` already uses (factor the body of `kara:download` into a shared internal function, e.g. `downloadSong(kid, onProgress): Promise<CatalogEntry>`, called by both the single-song handler and this bulk one — do not duplicate the download logic).
   4. After each song's bytes land, `upsertSong` as usual (same as single download).
@@ -32,8 +36,8 @@ Design doc §1 ("if the user already has a song... and adds another collection i
 
 ## Acceptance criteria
 
-- A favorites collection (feat 06) with some songs already downloaded standalone and some not: "Download all missing" downloads only the not-yet-owned ones, skips the rest, and the skip count in the summary matches reality.
+- A `remote-own` playlist (feat 06) with some songs already downloaded standalone and some not: "Download all missing" downloads only the not-yet-owned ones, skips the rest, and the skip count in the summary matches reality; afterwards every song in the remote list has a `collection_songs` row at its remote `position`.
 - Mid-batch failure (e.g. temporarily disconnect network after the first song): the operation reports the successes and the failure(s) distinctly rather than losing all progress; songs that did finish are present in the Catalog afterward.
 - Running "Download all missing" a second time immediately after a full success reports 0 downloaded / all skipped, with no duplicate files or rows.
 - Concurrent single-song download (from Search) while a bulk collection download is in flight does not corrupt either operation's progress reporting or produce duplicate/partial files (shared `downloadSong` + per-kid `tmp/<kid>.part` naming from feat 02 already prevents path collisions; verify this holds under the bulk path too).
-- `npm run lint` passes; manual walkthrough with a real favorites collection of at least 3–4 songs, mixing already-owned and new ones.
+- `npm run lint` passes; manual walkthrough with a real `remote-own` playlist of at least 3–4 songs, mixing already-owned and new ones.

@@ -41,7 +41,7 @@ This spike is part of this feat's implementation, not a separate planning step �
 This avoids a new route/nav item since login by itself has no content to browse — it's just a state toggle that later feats (06) read. **If you'd rather have a dedicated "Account" entry in the sidebar/a separate screen instead of folding it into Config, say so**; the rest of this feat (IPC/DB) is identical either way, only the `.vue` location changes.
 
 ### Explicitly not in this feat
-- No favorites/collections fetching (feat 06) — login only establishes and stores the session.
+- No playlists/collections fetching (feat 06) — login only establishes and stores the session.
 - No UI anywhere else reacting to login state (e.g. Search/Catalog screens don't change).
 
 ## Acceptance criteria

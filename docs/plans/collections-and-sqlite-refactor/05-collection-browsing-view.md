@@ -23,7 +23,7 @@ Design doc §3.3 (`collection_songs.position` preserves order), §3.6 (`replaceC
 - `src/views/CollectionsView.vue` (from feat 04): make each collection row clickable, routing to `collection-detail`.
 
 ### Explicitly not in this feat
-- No remote sync behavior — this view works identically for `local` collections (the only kind that exists through feat 04) and must not assume `source === 'local'` in a way that breaks once feat 06 introduces `remote-own` rows (e.g. don't hide the Remove button only for `local` — removing a song from your own synced favorites via this UI is reasonable and feat 06 should decide whether that also calls `deleteFavorites` remotely or stays purely local-removal; **flagging this for the feat-06 author to resolve explicitly**, this feat just needs to not crash on a non-local `source`).
+- No remote sync behavior — this view works identically for `local` collections (the only kind that exists through feat 04) and must not assume `source === 'local'` in a way that breaks once feat 06 introduces `remote-own` rows. **Resolved by feat 06:** "Remove from collection" (and reordering) must be disabled/hidden for `remote-own` rows, since a synced remote playlist is read-only in that feat; this view only needs to not crash on a non-local `source` and to expose the per-row flag it can gate on.
 - No bulk-add from Catalog beyond what feat 04 already built.
 
 ## Acceptance criteria

@@ -21,7 +21,7 @@ Design doc §7 (file/module change table) names this explicitly: "Update storage
 ## Explicitly not in this feat
 
 - No code changes.
-- No new features — purely reconciling documentation with whatever was actually implemented in feats 01–08 (or the subset that shipped, if 08 stayed blocked/dropped).
+- No new features — purely reconciling documentation with whatever was actually implemented in feats 01–08 (or the subset that shipped).
 
 ## Acceptance criteria
 

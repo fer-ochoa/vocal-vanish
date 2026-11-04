@@ -2,7 +2,7 @@
 
 > **Status:** design/planning document, not yet implemented.
 > **Audience:** written for another AI (or developer) to pick up and implement directly. It assumes familiarity with the current codebase as described in [`implementation.md`](./implementation.md) but repeats enough context to be self-contained.
-> **Scope:** this document covers (1) adding kara.moe account login, (2) adding "collections" (the user's own, other users' public ones, and kara.moe's own favorites/playlists concept) on top of today's single-song downloads, (3) replacing the flat `catalog.json` + flat-file storage with a per-song folder tree, and (4) replacing the JSON index with a local SQLite database managed through an ORM. Database **migrations are explicitly out of scope** — see §6.
+> **Scope:** this document covers (1) adding kara.moe account login, (2) adding "collections" — modeled on kara.moe **playlists** (the user's own, other users' public ones), not the favorites list — on top of today's single-song downloads, (3) replacing the flat `catalog.json` + flat-file storage with a per-song folder tree, and (4) replacing the JSON index with a local SQLite database managed through an ORM. Database **migrations are explicitly out of scope** — see §6.
 
 ---
 
@@ -29,8 +29,8 @@ None of this should break the existing single-song search → download → catal
 1. **The song library** — one row per downloaded song, keyed by `kid`. This is pure download/file bookkeeping: do we have the bytes, where, what variants. Exactly what `catalog.json` is today, just moved into SQLite.
 2. **Collections** — named, ordered lists of `kid` references. A collection can be:
    - `local` — created entirely in this app, never synced to kara.moe (a "my own mix" list).
-   - `remote-own` — the user's own favorites/playlist on kara.moe (fetched after login).
-   - `remote-subscribed` — another user's **public** collection the user chose to browse/download from.
+   - `remote-own` — one of the user's own playlists on kara.moe (`GET /playlist`, filtered to their username; fetched after login / on explicit sync).
+   - `remote-subscribed` — another user's **public** playlist the user chose to browse/download from.
 3. **Membership** is **many-to-many**: a song can be in zero, one, or many collections, and standalone single-song downloads simply have **zero** collection memberships. That's a first-class, unremarkable state — not a special case.
 
 ### Why not a fake "local" collection holding every standalone download?
@@ -41,7 +41,7 @@ None of this should break the existing single-song search → download → catal
 
 ### Why this shape, not something bespoke
 
-This is the same shape used by every mainstream library/playlist system, and — more importantly — by **the software that runs kara.moe itself** (Karaoke Mugen App/Server): a global `kara` (song) entity keyed by `kid`, and favorites/playlists that are just arrays of `{kid}` scoped to a user (`getFavoritesMicro` returns bare `{kid}` lists; `addFavorites`/`deleteFavorites` take `{kids: [...]}`, fully decoupled from where/whether the media is stored). Mirroring that is aligning with the upstream system, not reinventing a concept:
+This is the same shape used by every mainstream library/playlist system, and — more importantly — by **the software that runs kara.moe itself** (Karaoke Mugen App/Server): a global `kara` (song) entity keyed by `kid`, and favorites/playlists that are just arrays of `{kid}` scoped to a user (`GET /playlist/{plaid}` returns ordered `{kid}` contents; `POST /favorites/{kid}` / `DELETE /favorites/{kid}` are per-song, fully decoupled from where/whether the media is stored). Mirroring that is aligning with the upstream system, not reinventing a concept:
 
 - Spotify / Apple Music / YouTube Music: one global track table + playlists that are ordered join rows against it ("Liked Songs" is itself just a playlist internally).
 - Plex / Jellyfin: media library separate from playlists/collections (ordered item-id lists); an item needs no playlist membership to exist.
@@ -154,6 +154,7 @@ export const collections = sqliteTable("collections", {
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),         // bumped whenever metadata or membership changes locally
   lastSyncedAt: text("last_synced_at"),            // ISO date of last successful remote sync; null for purely local collections
+  remoteItemCount: integer("remote_item_count"),   // for remote playlists: the remote's own karacount (membership rows only exist for downloaded songs, so this is the only way to show "X of Y")
 });
 
 /**
@@ -238,7 +239,8 @@ function openDb() {
       owner_username TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      last_synced_at TEXT
+      last_synced_at TEXT,
+      remote_item_count INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS collection_songs (
@@ -318,23 +320,27 @@ These four functions cover every dedup/membership requirement from the design di
 
 ## 4. kara.moe account login
 
-kara.moe is the public frontend of **Karaoke Mugen Server**; its auth and favorites/playlist concepts are documented under the Karaoke Mugen App API (`https://api.karaokes.moe/app/`). Relevant pieces:
+kara.moe is the public frontend of **Karaoke Mugen Server**. Its REST surface is documented by the Swagger UI at `https://api.karaokes.moe/server/` and is served by kara.moe at `https://kara.moe/api` (both verified live on 2026-11-04).
 
-- **Login**: `POST`-equivalent `login` command — request `{ username, password }`, response `{ token, username, role, onlineToken? }`. `role` is one of `guest | user | admin`.
-- **Favorites** (the closest kara.moe concept to "my collection"):
-  - `getFavoritesMicro` — returns a bare `[{ kid }, ...]` list for the logged-in user (cheap, minimal payload — good for the "which of these search results do I already have" style check, mirrored at the collection level, not just local DB level, if needed).
-  - `getFavorites` — full song objects (same shape as search results), paginated (`filter`, `from`, `size`).
-  - `addFavorites` / `deleteFavorites` — take `{ kids: [...] }`.
-  - `exportFavorites` / `importFavorites` — JSON import/export of a favorites list.
-- Requests after login carry the token in an `authorization` field (REST: pass it as a header/body field per the `/api/command` wrapper endpoint, since the primary protocol is Socket.IO but a REST passthrough exists at `/api/command`).
+- **Login**: `POST /auth/login` — request `{ username, password }`, response `{ token, username, role }`; the token is a JWT to send as `Authorization: Bearer <token>`. `GET /auth/check` validates a token. Any malformed/expired `Authorization` header returns `403` even on public routes, so only attach it where it is needed.
+- **Playlists** (the kara.moe concept that maps to a collection — named, ordered, plural):
+  - `GET /playlist` — public, no auth. Flat array of playlist objects: `plaid`, `name`, `description`, `slug`, `karacount`, `duration`, `created_at`, `modified_at`, `flag_visible`, `flag_visible_online`, `username`, `nickname`, `avatar_file`, `favorited`, `contributors[]`. The documented Swagger params for this route are stale; the four to build on are `filter=<text>` (name + description), `order=<az|recent|karacount|duration|username>` (invalid → `400 INVALID_DATA`), `byUsername=<username>` (that user only, case-insensitive), and `includeUserAsContributor=true` (also include playlists the user contributes to — presence-only: `=false` does not exclude them, only omitting the param does). The whole filtered array comes back in one response; unfiltered it is ~1477 rows / ~600 KB, so always pass `byUsername` or `filter`.
+  - Usage pattern in the upstream app: **playlists across all users** → pass only `filter` + `order`; **the logged-in user's own** → pass `filter` + `order` + `byUsername=<me>` + `includeUserAsContributor=true`. `order` values mean: `az` = alphabetically by name, `recent` = more recent first, `karacount` = number of songs, `duration` = playlist duration, `username` = owner username alphabetically.
+  - `GET /playlist/{plaid}?from=&size=&filter=` — public, no auth. `{infos: {count, from, to}, i18n, avatars, content: [...]}`, where each content row is a full song object plus `pos` (1-based order), `plcid`, `plaid`, `added_at`, `flag_favorites`. Paginated via `from`/`size`. Only the playlist *contents* are unbounded in size, so only they need a paging loop.
+  - `POST /playlist`, `PUT /playlist/{plaid}`, `DELETE /playlist/{plaid}`, `POST /playlist/{plaid}` (add songs), `POST /playlist/{plaid}/empty`, `POST /playlist/content/delete`, `PUT /playlist/content/edit`, `/playlist/import`, `/playlist/{plaid}/export` — all auth-only mutations. Not used by the plan (no two-way sync).
+  - `GET /users`, `GET /users/{user}` — public user list / public profile, for discovering whose playlists to browse.
+- **Favorites** (a different concept; deliberately *not* the model for a collection):
+  - `GET /favorites` — auth-only, returns the caller's own favorites as a bare `[{kid}]` list: no order, no name, no pagination.
+  - `POST /favorites/{kid}` / `DELETE /favorites/{kid}` — add/remove one favorite.
+  - These are user-private and are not usable to read another user's favorites, and they are not playlists. A "Favorites" view could be built later as a single synthetic collection, but the collections model is playlists.
 
 **Implementation guidance (not yet built):**
 1. Add `kara:login(username, password)` / `kara:logout()` IPC handlers in the main process. On success, upsert the singleton `account` row (§3.3) with the returned `token`/`username`/`role`/`onlineToken`.
 2. Add `kara:account-status()` returning `{ loggedIn: boolean, username?, role? }` so the renderer can show "Logged in as X" / a login form, without ever exposing the raw token to the renderer.
-3. All subsequent collection-sync calls (favorites fetch, public collection browse) read the token from the `account` table in the main process and attach it server-side — the renderer only ever calls `window.kara.*` methods, same security boundary as today.
+3. All subsequent collection-sync calls (own-playlist listing, playlist contents, public playlist browsing) read the token from the `account` table in the main process and attach it server-side — the renderer only ever calls `window.kara.*` methods, same security boundary as today. Public playlist routes need no token at all.
 4. The app must continue to work fully logged-out: search, single-song download, and purely `local` collections never require a row in `account`.
 
-This part needs a confirmed, tested round-trip against the real kara.moe REST passthrough before being considered done — the exact transport (Socket.IO vs. the `/api/command` REST wrapper) should be re-verified against the live API when implementing, since kara.moe's primary protocol is Socket.IO and the REST surface is a convenience wrapper over it.
+This part was implemented in feat 03 and verified against the live API: login is a plain `POST /api/auth/login` with `{username, password}` returning a JWT, sent afterwards as `Authorization: Bearer <token>` (there is no `/api/command` wrapper in use — the Swagger at `https://api.karaokes.moe/server/` documents the REST routes directly, and `https://kara.moe/api` serves them). One gotcha worth remembering: a malformed/expired token makes even **public** routes answer `403`, so the header must only be attached to requests that actually need it.
 
 ---
 
@@ -351,6 +357,8 @@ New channels to add:
 | `kara:account-status` | `handle` | Returns `{loggedIn, username?, role?}`. |
 | `kara:collections-list` | `handle` | Returns local `collections` rows (own + subscribed + local), for the sidebar/collections screen. |
 | `kara:collection-browse` | `handle` | `{collectionId}` or `{remoteId}` → paginated song rows (reuse `songToRow`), each flagged `downloaded` against the **global** `songs` table (never per-collection). |
+| `kara:collection-sync-remote-own` | `handle` | `{filter?, order?}` → lists the logged-in user's own kara.moe playlists (`GET /playlist?filter=&order=&byUsername=<me>&includeUserAsContributor=true`), upserts one `source: 'remote-own'` row per playlist (`id` = `plaid`), fetches contents for the opened ones (`GET /playlist/{plaid}`, paginated) and bumps `lastSyncedAt`. No-op when logged out. |
+| `kara:collection-browse-user` / `kara:collection-subscribe` | `handle` | `{username, filter?, order?, includeContributions?}` → that user's public playlists via `byUsername` (no DB writes); `{plaid}` → upsert a `source: 'remote-subscribed'` row + contents snapshot. |
 | `kara:collection-download` | `handle` | `{remoteId}` → fetches the full remote song list, computes `missingKidsForBulkDownload`, downloads only those, writes/updates the `collections` + `collection_songs` rows via `replaceCollectionMembership`, reports per-song progress the same way `kara:download-progress` does today (one event stream, `{kid, received, total}` per song in flight). |
 | `kara:collection-create` | `handle` | `{name}` → creates a `source: 'local'` collection with a generated UUID. |
 | `kara:collection-add-song` / `kara:collection-remove-song` | `handle` | Manage membership of local (and own-remote, if the app later supports editing those) collections from the Catalog view. |
