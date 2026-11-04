@@ -57,8 +57,11 @@ app.commandLine.appendSwitch("enable-features", "ForceEnableWebGpuInterop");
 // network directly, following Electron security best practices).
 // ---------------------------------------------------------------------------
 
-const API_BASE = process.env.API_URL + "/api";
-const MEDIA_BASE = process.env.API_URL;
+// Strip trailing slashes so a misconfigured API_URL (e.g. "https://kara.moe/")
+// does not produce double-slash paths like "https://kara.moe//api".
+const _API_URL = (process.env.API_URL || "").replace(/\/+$/, "");
+const API_BASE = _API_URL + "/api";
+const MEDIA_BASE = _API_URL;
 
 export interface TagRef {
   tid: string;
@@ -657,13 +660,44 @@ function registerIpc(): void {
   // -----------------------------------------------------------------------
   // kara.moe account login (feat 03)
   // -----------------------------------------------------------------------
-  // Transport: REST passthrough at POST https://kara.moe/api/command
-  // (documented in the design doc §4; the primary protocol is Socket.IO but
-  // the REST wrapper is the convenience path we use here). The request body
-  // is { command: "login", params: { username, password } } and the response
-  // is { token, username, role, onlineToken? }. This has NOT been verified
-  // against the live server — if the shape differs, adjust the handler below.
+  // Transport: the official server auth endpoint, POST https://kara.moe/api/auth/login
+  // (documented in the server Swagger at https://api.karaokes.moe/server/#/auth/login).
+  // The request body is exactly { username, password }. The response is a direct
+  // Token object { token, username, role, onlineToken? } — no envelope wrapping.
 
+  /**
+   * Extract a human-readable message from a JSON error body, if the server
+   * sent one. Only the `message`/`error` fields are surfaced — never the
+   * request body (password) or any token.
+   */
+  function jsonErrorMessage(raw: string): string | null {
+    try {
+      const obj = JSON.parse(raw) as {
+        code?: unknown;
+        message?: unknown;
+        error?: unknown;
+      };
+      // The server's Swagger error shape is { code, message }. Surface the
+      // `message` string when present; fall back to the `code` (or a nested
+      // `error` field) so the user gets something actionable. Never the
+      // request body (password) or any token.
+      const candidates: unknown[] = [obj.message, obj.error, obj.code];
+      for (const c of candidates) {
+        if (typeof c === "string" && c.trim()) return c.trim();
+        if (
+          c &&
+          typeof c === "object" &&
+          typeof (c as { code?: unknown }).code === "string" &&
+          (c as { code?: string }).code.trim()
+        ) {
+          return (c as { code: string }).code.trim();
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
   /** POST a JSON body to a URL using Node's https module. */
   function httpPostJson<T>(url: string, body: unknown): Promise<T> {
     return new Promise((resolve, reject) => {
@@ -680,9 +714,20 @@ function registerIpc(): void {
         },
         (res) => {
           if (!res.statusCode || res.statusCode >= 400) {
-            const err = new Error(`HTTP ${res.statusCode} for ${url}`);
-            res.resume();
-            reject(err);
+            // Read the error body so we can surface the server's message
+            // (e.g. "Invalid credentials") without leaking the request.
+            let raw = "";
+            res.setEncoding("utf8");
+            res.on("data", (chunk) => (raw += chunk));
+            res.on("end", () => {
+              const detail = jsonErrorMessage(raw);
+              reject(
+                new Error(
+                  `HTTP ${res.statusCode} for ${url}` +
+                    (detail ? `: ${detail}` : ""),
+                ),
+              );
+            });
             return;
           }
           let raw = "";
@@ -723,17 +768,19 @@ function registerIpc(): void {
       if (!username || !password) {
         throw new Error("Username and password are required.");
       }
-      let result: KaraLoginResponse;
+      let raw: KaraLoginResponse;
       try {
-        result = await httpPostJson<KaraLoginResponse>(
-          `${API_BASE}/command`,
-          { command: "login", params: { username, password } },
+        raw = await httpPostJson<KaraLoginResponse>(
+          `${API_BASE}/auth/login`,
+          { username, password },
         );
       } catch (e) {
         throw new Error(
           `Login failed: ${(e as Error).message}. Check your credentials and connection.`,
         );
       }
+      // The endpoint returns the Token object directly (no envelope).
+      const result: KaraLoginResponse | undefined = raw;
       if (!result || !result.token) {
         throw new Error(
           "Login failed: the server did not return a valid token. " +
