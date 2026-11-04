@@ -10,6 +10,18 @@ import {
   updateLyriclessFile,
   deleteSong,
   backfillSongMetadata,
+  getAccount,
+  setAccount,
+  clearAccount,
+  listCollections,
+  listCollectionsWithCounts,
+  createLocalCollection,
+  renameCollection,
+  deleteCollection,
+  getCollectionSongs,
+  addSongToCollection,
+  removeSongFromCollection,
+  collectionsForSong,
 } from "./db/queries";
 import { runLegacyImport } from "./db/legacy-import";
 import { runLegacyFolderMigration } from "./db/legacy-folder-migration";
@@ -639,6 +651,177 @@ function registerIpc(): void {
       settings.separationModel = assertValidModel(model);
       writeSettings(settings);
       return settings;
+    },
+  );
+
+  // -----------------------------------------------------------------------
+  // kara.moe account login (feat 03)
+  // -----------------------------------------------------------------------
+  // Transport: REST passthrough at POST https://kara.moe/api/command
+  // (documented in the design doc §4; the primary protocol is Socket.IO but
+  // the REST wrapper is the convenience path we use here). The request body
+  // is { command: "login", params: { username, password } } and the response
+  // is { token, username, role, onlineToken? }. This has NOT been verified
+  // against the live server — if the shape differs, adjust the handler below.
+
+  /** POST a JSON body to a URL using Node's https module. */
+  function httpPostJson<T>(url: string, body: unknown): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const data = JSON.stringify(body);
+      const req = https.request(
+        url,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(data),
+            "User-Agent": "vocal-vanish/1.0",
+          },
+        },
+        (res) => {
+          if (!res.statusCode || res.statusCode >= 400) {
+            const err = new Error(`HTTP ${res.statusCode} for ${url}`);
+            res.resume();
+            reject(err);
+            return;
+          }
+          let raw = "";
+          res.setEncoding("utf8");
+          res.on("data", (chunk) => (raw += chunk));
+          res.on("end", () => {
+            try {
+              resolve(JSON.parse(raw) as T);
+            } catch (e) {
+              reject(
+                new Error(`Invalid JSON from ${url}: ${(e as Error).message}`),
+              );
+            }
+          });
+        },
+      );
+      req.on("error", reject);
+      req.write(data);
+      req.end();
+    });
+  }
+
+  interface KaraLoginResponse {
+    token: string;
+    username: string;
+    role: "guest" | "user" | "admin";
+    onlineToken?: string | null;
+  }
+
+  ipcMain.handle(
+    "kara:login",
+    async (
+      _e,
+      params: { username: string; password: string },
+    ): Promise<{ username: string; role: string }> => {
+      const username = (params.username || "").trim();
+      const password = params.password || "";
+      if (!username || !password) {
+        throw new Error("Username and password are required.");
+      }
+      let result: KaraLoginResponse;
+      try {
+        result = await httpPostJson<KaraLoginResponse>(
+          `${API_BASE}/command`,
+          { command: "login", params: { username, password } },
+        );
+      } catch (e) {
+        throw new Error(
+          `Login failed: ${(e as Error).message}. Check your credentials and connection.`,
+        );
+      }
+      if (!result || !result.token) {
+        throw new Error(
+          "Login failed: the server did not return a valid token. " +
+            "The API response shape may have changed.",
+        );
+      }
+      setAccount({
+        username: result.username || username,
+        token: result.token,
+        onlineToken: result.onlineToken ?? null,
+        role: result.role || "user",
+        loggedInAt: new Date().toISOString(),
+      });
+      return { username: result.username || username, role: result.role || "user" };
+    },
+  );
+
+  ipcMain.handle("kara:logout", async (): Promise<boolean> => {
+    clearAccount();
+    return true;
+  });
+
+  ipcMain.handle(
+    "kara:account-status",
+    async (): Promise<{ loggedIn: boolean; username?: string; role?: string }> => {
+      const row = getAccount();
+      if (!row) return { loggedIn: false };
+      // Never return the token to the renderer.
+      return { loggedIn: true, username: row.username, role: row.role };
+    },
+  );
+
+  // -----------------------------------------------------------------------
+  // Collections (feat 04)
+  // -----------------------------------------------------------------------
+
+  ipcMain.handle("kara:collections-list", async () => {
+    return listCollectionsWithCounts();
+  });
+
+  ipcMain.handle(
+    "kara:collection-create",
+    async (_e, name: string) => {
+      const trimmed = (name || "").trim();
+      if (!trimmed) throw new Error("Collection name is required.");
+      return createLocalCollection(trimmed);
+    },
+  );
+
+  ipcMain.handle(
+    "kara:collection-rename",
+    async (_e, id: string, name: string) => {
+      const trimmed = (name || "").trim();
+      if (!trimmed) throw new Error("Collection name is required.");
+      renameCollection(id, trimmed);
+    },
+  );
+
+  ipcMain.handle("kara:collection-delete", async (_e, id: string) => {
+    deleteCollection(id);
+    return true;
+  });
+
+  ipcMain.handle(
+    "kara:collection-add-song",
+    async (_e, collectionId: string, kid: string) => {
+      addSongToCollection(collectionId, kid);
+    },
+  );
+
+  ipcMain.handle(
+    "kara:collection-remove-song",
+    async (_e, collectionId: string, kid: string) => {
+      removeSongFromCollection(collectionId, kid);
+    },
+  );
+
+  ipcMain.handle(
+    "kara:collection-songs",
+    async (_e, collectionId: string) => {
+      return getCollectionSongs(collectionId);
+    },
+  );
+
+  ipcMain.handle(
+    "kara:collections-for-song",
+    async (_e, kid: string) => {
+      return collectionsForSong(kid);
     },
   );
 }

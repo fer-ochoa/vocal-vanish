@@ -1,6 +1,7 @@
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql, and } from "drizzle-orm";
+import { randomUUID } from "crypto";
 import { db } from "./index";
-import { songs } from "./schema";
+import { songs, collections, collectionSongs, account } from "./schema";
 
 /**
  * A catalog entry persisted locally for a downloaded song.
@@ -143,4 +144,182 @@ export function backfillSongMetadata(
     .set({ langs, offVocal })
     .where(eq(songs.kid, kid))
     .run();
+}
+
+// ---------------------------------------------------------------------------
+// Account (kara.moe login session)
+// ---------------------------------------------------------------------------
+
+/** A row in the singleton `account` table. */
+export interface AccountRow {
+  id: number;
+  username: string;
+  token: string;
+  onlineToken: string | null;
+  role: "guest" | "user" | "admin";
+  loggedInAt: string;
+}
+
+/** The current login session, or `undefined` when not logged in. */
+export function getAccount(): AccountRow | undefined {
+  const row = db.select().from(account).where(eq(account.id, 1)).get();
+  return row;
+}
+
+/** Upsert the singleton `account` row (id=1). */
+export function setAccount(row: {
+  username: string;
+  token: string;
+  onlineToken?: string | null;
+  role: "guest" | "user" | "admin";
+  loggedInAt: string;
+}): void {
+  db.insert(account)
+    .values({
+      id: 1,
+      username: row.username,
+      token: row.token,
+      onlineToken: row.onlineToken ?? null,
+      role: row.role,
+      loggedInAt: row.loggedInAt,
+    })
+    .onConflictDoUpdate({
+      target: account.id,
+      set: {
+        username: row.username,
+        token: row.token,
+        onlineToken: row.onlineToken ?? null,
+        role: row.role,
+        loggedInAt: row.loggedInAt,
+      },
+    })
+    .run();
+}
+
+/** Remove the `account` row (log out). */
+export function clearAccount(): void {
+  db.delete(account).where(eq(account.id, 1)).run();
+}
+
+// ---------------------------------------------------------------------------
+// Collections
+// ---------------------------------------------------------------------------
+
+/** A row in the `collections` table. */
+export interface CollectionRow {
+  id: string;
+  name: string;
+  source: "local" | "remote-own" | "remote-subscribed";
+  ownerUsername: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastSyncedAt: string | null;
+}
+
+/** All collections ordered by name. */
+export function listCollections(): CollectionRow[] {
+  return db.select().from(collections).orderBy(collections.name).all();
+}
+
+/** All collections with their song count, ordered by name. */
+export function listCollectionsWithCounts(): (CollectionRow & { songCount: number })[] {
+  return db
+    .select({
+      id: collections.id,
+      name: collections.name,
+      source: collections.source,
+      ownerUsername: collections.ownerUsername,
+      createdAt: collections.createdAt,
+      updatedAt: collections.updatedAt,
+      lastSyncedAt: collections.lastSyncedAt,
+      songCount: sql<number>`count(${collectionSongs.kid})`,
+    })
+    .from(collections)
+    .leftJoin(collectionSongs, eq(collectionSongs.collectionId, collections.id))
+    .groupBy(collections.id)
+    .orderBy(collections.name)
+    .all();
+}
+
+/** Create a new local collection. Returns the created row. */
+export function createLocalCollection(name: string): CollectionRow {
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  db.insert(collections)
+    .values({
+      id,
+      name,
+      source: "local",
+      ownerUsername: null,
+      createdAt: now,
+      updatedAt: now,
+      lastSyncedAt: null,
+    })
+    .run();
+  return {
+    id,
+    name,
+    source: "local",
+    ownerUsername: null,
+    createdAt: now,
+    updatedAt: now,
+    lastSyncedAt: null,
+  };
+}
+
+/** Rename a collection (bumps `updatedAt`). */
+export function renameCollection(id: string, name: string): void {
+  db.update(collections)
+    .set({ name, updatedAt: new Date().toISOString() })
+    .where(eq(collections.id, id))
+    .run();
+}
+
+/** Delete a collection. `ON DELETE CASCADE` removes `collection_songs` rows. */
+export function deleteCollection(id: string): void {
+  db.delete(collections).where(eq(collections.id, id)).run();
+}
+
+/** Songs in a collection, ordered by position. */
+export function getCollectionSongs(collectionId: string): CatalogEntry[] {
+  const rows = db
+    .select({ song: songs, position: collectionSongs.position })
+    .from(collectionSongs)
+    .innerJoin(songs, eq(collectionSongs.kid, songs.kid))
+    .where(eq(collectionSongs.collectionId, collectionId))
+    .orderBy(collectionSongs.position)
+    .all();
+  return rows.map((r) => rowToEntry(r.song));
+}
+
+/** Add a song to a collection at the next position. No-op if already a member. */
+export function addSongToCollection(collectionId: string, kid: string): void {
+  const maxPos = db
+    .select({ val: sql<number>`coalesce(max(${collectionSongs.position}), 0)` })
+    .from(collectionSongs)
+    .where(eq(collectionSongs.collectionId, collectionId))
+    .get()?.val ?? 0;
+  db.insert(collectionSongs)
+    .values({ collectionId, kid, position: maxPos + 1 })
+    .onConflictDoNothing()
+    .run();
+}
+
+/** Remove a song from a collection (membership row only; does not touch `songs`). */
+export function removeSongFromCollection(collectionId: string, kid: string): void {
+  db.delete(collectionSongs)
+    .where(
+      sql`${collectionSongs.collectionId} = ${collectionId} AND ${collectionSongs.kid} = ${kid}`,
+    )
+    .run();
+}
+
+/** Collections a given song belongs to (id + name). */
+export function collectionsForSong(kid: string): { id: string; name: string }[] {
+  return db
+    .select({ id: collections.id, name: collections.name })
+    .from(collectionSongs)
+    .innerJoin(collections, eq(collectionSongs.collectionId, collections.id))
+    .where(eq(collectionSongs.kid, kid))
+    .all();
 }

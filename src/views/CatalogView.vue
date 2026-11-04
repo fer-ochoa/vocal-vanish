@@ -41,6 +41,27 @@
           >
             Lyricless
           </button>
+          <!-- Add to collection (feat 04) -->
+          <div class="collection-menu" v-if="collections.length">
+            <button class="btn btn-ghost" title="Add to collection" @click="toggleCollectionMenu(entry.kid)">
+              📁
+            </button>
+            <div v-if="openCollectionMenu === entry.kid" class="collection-dropdown">
+              <div class="collection-dropdown-title">Collections</div>
+              <label
+                v-for="col in collections"
+                :key="col.id"
+                class="collection-dropdown-item"
+              >
+                <input
+                  type="checkbox"
+                  :checked="isInCollection(entry.kid, col.id)"
+                  @change="toggleCollectionMembership(entry.kid, col.id)"
+                />
+                <span>{{ col.name }}</span>
+              </label>
+            </div>
+          </div>
           <button class="btn btn-ghost" title="Delete" @click="remove(entry.kid)">✕</button>
         </div>
       </li>
@@ -88,6 +109,66 @@ const entries = ref<any[]>([]);
 const filter = ref('');
 const loaded = ref(false);
 const error = ref('');
+// --- Collections (feat 04) ------------------------------------------------
+const collections = ref<any[]>([]);
+const openCollectionMenu = ref<string | null>(null);
+// kid -> Set<collectionId> for quick membership lookup
+const membershipMap = ref<Map<string, Set<string>>>(new Map());
+
+async function loadCollections(): Promise<void> {
+  try {
+    collections.value = await window.kara.collectionsList();
+  } catch {
+    collections.value = [];
+  }
+}
+
+async function loadMembership(kid: string): Promise<void> {
+  try {
+    const cols = await window.kara.collectionsForSong(kid);
+    const set = new Set(cols.map((c: any) => c.id));
+    membershipMap.value.set(kid, set);
+  } catch {
+    membershipMap.value.set(kid, new Set());
+  }
+}
+
+function isInCollection(kid: string, collectionId: string): boolean {
+  return membershipMap.value.get(kid)?.has(collectionId) ?? false;
+}
+
+function toggleCollectionMenu(kid: string): void {
+  if (openCollectionMenu.value === kid) {
+    openCollectionMenu.value = null;
+    return;
+  }
+  openCollectionMenu.value = kid;
+  // Lazy-load membership for this song if not already cached
+  if (!membershipMap.value.has(kid)) {
+    loadMembership(kid);
+  }
+}
+
+async function toggleCollectionMembership(kid: string, collectionId: string): Promise<void> {
+  const currentlyIn = isInCollection(kid, collectionId);
+  try {
+    if (currentlyIn) {
+      await window.kara.collectionRemoveSong(collectionId, kid);
+    } else {
+      await window.kara.collectionAddSong(collectionId, kid);
+    }
+    // Update local membership cache
+    const set = membershipMap.value.get(kid) ?? new Set<string>();
+    if (currentlyIn) {
+      set.delete(collectionId);
+    } else {
+      set.add(collectionId);
+    }
+    membershipMap.value.set(kid, set);
+  } catch (e) {
+    error.value = (e as Error).message || 'Failed to update collection';
+  }
+}
 
 // --- Pagination ------------------------------------------------------------
 const PAGE_SIZES = [10, 25, 50, 100, 250];
@@ -243,5 +324,8 @@ function fmtDuration(s: number): string {
   return `${m}:${String(sec).padStart(2, '0')}`;
 }
 
-onMounted(load);
+onMounted(() => {
+  load();
+  loadCollections();
+});
 </script>

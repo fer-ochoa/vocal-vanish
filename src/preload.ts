@@ -48,6 +48,20 @@ export interface AppSettings {
   /** unblend model id used to generate lyricless videos. */
   separationModel: string;
 }
+/** A collection row (mirrors CollectionRow in src/db/queries.ts). */
+export interface CollectionRow {
+  id: string;
+  name: string;
+  source: 'local' | 'remote-own' | 'remote-subscribed';
+  ownerUsername: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastSyncedAt: string | null;
+}
+/** A collection row with its song count (from `kara:collections-list`). */
+export interface CollectionRowWithCount extends CollectionRow {
+  songCount: number;
+}
 
 /**
  * The only surface the renderer can use. Everything is a narrow, promise-based
@@ -187,6 +201,52 @@ const api = {
     const listener = (_e: unknown, p: DownloadProgress): void => callback(p);
     ipcRenderer.on('kara:download-progress', listener);
     return () => ipcRenderer.removeListener('kara:download-progress', listener);
+  },
+  // --- Account (feat 03) -------------------------------------------------
+  /** Log in to kara.moe. Returns { username, role } on success. */
+  login(params: { username: string; password: string }): Promise<{ username: string; role: string }> {
+    return ipcRenderer.invoke('kara:login', params);
+  },
+  /** Log out (clears the stored session). */
+  logout(): Promise<boolean> {
+    return ipcRenderer.invoke('kara:logout');
+  },
+  /** Current login status (never includes the token). */
+  accountStatus(): Promise<{ loggedIn: boolean; username?: string; role?: string }> {
+    return ipcRenderer.invoke('kara:account-status');
+  },
+  // --- Collections (feat 04) ---------------------------------------------
+  /** List all collections with song counts. */
+  collectionsList(): Promise<CollectionRowWithCount[]> {
+    return ipcRenderer.invoke('kara:collections-list');
+  },
+  /** Create a new local collection. */
+  collectionCreate(name: string): Promise<CollectionRow> {
+    return ipcRenderer.invoke('kara:collection-create', name);
+  },
+  /** Rename a collection. */
+  collectionRename(id: string, name: string): Promise<void> {
+    return ipcRenderer.invoke('kara:collection-rename', id, name);
+  },
+  /** Delete a collection (membership rows cascade; songs are untouched). */
+  collectionDelete(id: string): Promise<boolean> {
+    return ipcRenderer.invoke('kara:collection-delete', id);
+  },
+  /** Add a song to a collection. */
+  collectionAddSong(collectionId: string, kid: string): Promise<void> {
+    return ipcRenderer.invoke('kara:collection-add-song', collectionId, kid);
+  },
+  /** Remove a song from a collection. */
+  collectionRemoveSong(collectionId: string, kid: string): Promise<void> {
+    return ipcRenderer.invoke('kara:collection-remove-song', collectionId, kid);
+  },
+  /** Get the songs in a collection, ordered by position. */
+  collectionSongs(collectionId: string): Promise<CatalogEntry[]> {
+    return ipcRenderer.invoke('kara:collection-songs', collectionId);
+  },
+  /** Get the collections a given song belongs to. */
+  collectionsForSong(kid: string): Promise<{ id: string; name: string }[]> {
+    return ipcRenderer.invoke('kara:collections-for-song', kid);
   },
 };
 

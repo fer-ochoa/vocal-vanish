@@ -5,6 +5,55 @@
       <p class="muted">Separation model and processing acceleration.</p>
     </header>
 
+    <!-- Account ----------------------------------------------------------- -->
+    <section class="card">
+      <h2>Account</h2>
+      <p class="muted small">
+        Log in to your kara.moe account. This is required for synced
+        collections and other account features.
+      </p>
+      <!-- Logged-out state -->
+      <template v-if="!account.loggedIn">
+        <div class="config-field">
+          <input
+            v-model.trim="loginUsername"
+            class="input"
+            placeholder="Username"
+            spellcheck="false"
+            :disabled="loginBusy"
+          />
+        </div>
+        <div class="config-field">
+          <input
+            v-model="loginPassword"
+            class="input"
+            type="password"
+            placeholder="Password"
+            :disabled="loginBusy"
+            @keyup.enter="doLogin"
+          />
+        </div>
+        <div class="config-field">
+          <button class="btn btn-primary" :disabled="loginBusy || !loginUsername || !loginPassword" @click="doLogin">
+            {{ loginBusy ? 'Logging in…' : 'Log in' }}
+          </button>
+        </div>
+        <p v-if="loginError" class="warn-note">{{ loginError }}</p>
+      </template>
+      <!-- Logged-in state -->
+      <template v-else>
+        <p>
+          Logged in as <strong>{{ account.username }}</strong>
+          <span class="badge badge-dim">{{ account.role }}</span>
+        </p>
+        <div class="config-field">
+          <button class="btn" :disabled="loginBusy" @click="doLogout">
+            {{ loginBusy ? 'Logging out…' : 'Log out' }}
+          </button>
+        </div>
+        <p v-if="loginError" class="warn-note">{{ loginError }}</p>
+      </template>
+    </section>
     <!-- Separation model -------------------------------------------------- -->
     <section class="card">
       <h2>Separation model</h2>
@@ -80,6 +129,52 @@ const accel = ref<AccelerationStatus | null>(null);
 const checking = ref(false);
 const savedNote = ref('');
 const cacheNote = ref('');
+// --- Account (feat 03) ---------------------------------------------------
+const account = ref<{ loggedIn: boolean; username?: string; role?: string }>({ loggedIn: false });
+const loginUsername = ref('');
+const loginPassword = ref('');
+const loginBusy = ref(false);
+const loginError = ref('');
+
+async function refreshAccountStatus(): Promise<void> {
+  try {
+    account.value = await window.kara.accountStatus();
+  } catch {
+    account.value = { loggedIn: false };
+  }
+}
+
+async function doLogin(): Promise<void> {
+  if (loginBusy.value) return;
+  loginBusy.value = true;
+  loginError.value = '';
+  try {
+    const result = await window.kara.login({
+      username: loginUsername.value,
+      password: loginPassword.value,
+    });
+    loginPassword.value = '';
+    account.value = { loggedIn: true, username: result.username, role: result.role };
+  } catch (e) {
+    loginError.value = (e as Error).message || 'Login failed';
+  } finally {
+    loginBusy.value = false;
+  }
+}
+
+async function doLogout(): Promise<void> {
+  if (loginBusy.value) return;
+  loginBusy.value = true;
+  loginError.value = '';
+  try {
+    await window.kara.logout();
+    account.value = { loggedIn: false };
+  } catch (e) {
+    loginError.value = (e as Error).message || 'Logout failed';
+  } finally {
+    loginBusy.value = false;
+  }
+}
 
 const selected = computed(
   () => models.find((m) => m.id === selectedModel.value) || models[0],
@@ -160,6 +255,7 @@ onMounted(async () => {
   } catch {
     /* keep default */
   }
+  refreshAccountStatus();
   refreshCacheNote();
   accel.value = await detectAcceleration();
 });
