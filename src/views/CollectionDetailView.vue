@@ -4,10 +4,12 @@
       <h1>{{ collection ? collection.name : 'Collection' }}</h1>
       <p class="muted">
         <span class="tag" :class="sourceBadgeClass(collection ? collection.source : 'local')">{{ collection ? collection.source : '…' }}</span>
-        <span class="muted small">{{ songs.length }} song{{ songs.length === 1 ? '' : 's' }}</span>
+        <span v-if="isRemote" class="muted small">{{ downloadedCount }} of {{ rows.length }} downloaded</span>
+        <span v-else class="muted small">{{ songs.length }} song{{ songs.length === 1 ? '' : 's' }}</span>
       </p>
     </header>
-    <ul v-if="songs.length" class="list">
+    <!-- Local collections -->
+    <ul v-if="!isRemote && songs.length" class="list">
       <li v-for="(entry, idx) in songs" :key="entry.kid" class="row">
         <div class="row-main">
           <div class="row-title">{{ entry.title }}</div>
@@ -56,7 +58,35 @@
         </div>
       </li>
     </ul>
-    <p v-else-if="loaded" class="muted">No songs in this collection yet.</p>
+    <!-- Remote-own collections (read-only snapshot) -->
+    <ul v-if="isRemote && rows.length" class="list">
+      <li v-for="row in rows" :key="row.kid" class="row">
+        <div class="row-main">
+          <div class="row-title">{{ row.title }}</div>
+          <div class="row-sub">
+            <span class="muted small">{{ row.position }}.</span>
+            <span v-if="row.series" class="tag">{{ row.series }}</span>
+            <span v-if="row.singer" class="tag tag-dim">{{ row.singer }}</span>
+            <span v-if="row.duration != null" class="dur">{{ fmtDuration(row.duration) }}</span>
+            <span v-if="row.downloaded" class="tag tag-accent">Downloaded</span>
+            <span v-else class="tag tag-dim">Not downloaded</span>
+          </div>
+        </div>
+        <div class="row-actions">
+          <button
+            class="btn"
+            :disabled="!row.downloaded"
+            :title="row.downloaded ? 'Play' : 'Not downloaded yet'"
+            @click="play(row.kid)"
+          >
+            Play
+          </button>
+        </div>
+      </li>
+    </ul>
+    <!-- Empty states -->
+    <p v-if="loaded && isRemote && !rows.length" class="muted">This playlist is empty on kara.moe.</p>
+    <p v-if="loaded && !isRemote && !songs.length" class="muted">No songs in this collection yet.</p>
     <!-- Error toast -->
     <transition name="fade">
       <div v-if="error" class="toast">{{ error }}</div>
@@ -64,23 +94,30 @@
   </div>
 </template>
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 const route = useRoute();
 const router = useRouter();
 const collectionId = route.params.id as string;
 const collection = ref<any>(null);
 const songs = ref<any[]>([]);
+const rows = ref<any[]>([]);
 const loaded = ref(false);
 const busy = ref(false);
 const error = ref('');
+const isRemote = computed(() => collection.value?.source === 'remote-own');
+const downloadedCount = computed(() => rows.value.filter((r: any) => r.downloaded).length);
 async function load(): Promise<void> {
   try {
     // Load collection metadata
     const cols = await window.kara.collectionsList();
     collection.value = cols.find((c: any) => c.id === collectionId) || null;
     // Load songs in order
-    songs.value = await window.kara.collectionSongs(collectionId);
+    if (collection.value && collection.value.source === 'remote-own') {
+      rows.value = await window.kara.collectionRemoteItems(collectionId);
+    } else {
+      songs.value = await window.kara.collectionSongs(collectionId);
+    }
     loaded.value = true;
   } catch (e) {
     error.value = (e as Error).message || 'Failed to load collection';
@@ -90,6 +127,7 @@ function play(kid: string): void {
   router.push({ name: 'player', params: { kid } });
 }
 async function removeSong(kid: string): Promise<void> {
+  if (isRemote.value) return;
   if (!window.confirm('Remove this song from the collection? The song itself will not be deleted.')) return;
   busy.value = true;
   error.value = '';
@@ -103,6 +141,7 @@ async function removeSong(kid: string): Promise<void> {
   }
 }
 async function moveUp(idx: number): Promise<void> {
+  if (isRemote.value) return;
   if (idx === 0) return;
   busy.value = true;
   error.value = '';
@@ -118,6 +157,7 @@ async function moveUp(idx: number): Promise<void> {
   }
 }
 async function moveDown(idx: number): Promise<void> {
+  if (isRemote.value) return;
   if (idx === songs.value.length - 1) return;
   busy.value = true;
   error.value = '';

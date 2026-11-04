@@ -23,7 +23,22 @@ import {
   removeSongFromCollection,
   reorderCollection,
   collectionsForSong,
+  upsertRemoteOwnPlaylist,
+  replaceCollectionMembership,
+  replaceRemotePlaylistItems,
+  getRemotePlaylistItems,
+  getRemotePlaylistItemsWithDownloaded,
+  pruneRemoteOwnPlaylists,
+  getCollection,
+  isDownloaded,
 } from "./db/queries";
+import {
+  getMyPlaylists,
+  getPlaylistContents,
+  isPlaylistOrder,
+  playlistItemCount,
+  type PlaylistOrder,
+} from "./kara-api";
 import { runLegacyImport } from "./db/legacy-import";
 import { runLegacyFolderMigration } from "./db/legacy-folder-migration";
 import {
@@ -848,6 +863,10 @@ function registerIpc(): void {
   ipcMain.handle(
     "kara:collection-add-song",
     async (_e, collectionId: string, kid: string) => {
+      const col = getCollection(collectionId);
+      if (col && col.source !== "local") {
+        throw new Error("Songs can only be added to local collections.");
+      }
       addSongToCollection(collectionId, kid);
     },
   );
@@ -855,12 +874,20 @@ function registerIpc(): void {
   ipcMain.handle(
     "kara:collection-remove-song",
     async (_e, collectionId: string, kid: string) => {
+      const col = getCollection(collectionId);
+      if (col && col.source !== "local") {
+        throw new Error("Songs can only be removed from local collections.");
+      }
       removeSongFromCollection(collectionId, kid);
     },
   );
   ipcMain.handle(
     "kara:collection-reorder",
     async (_e, collectionId: string, orderedKids: string[]) => {
+      const col = getCollection(collectionId);
+      if (col && col.source !== "local") {
+        throw new Error("Collections synced from kara.moe cannot be reordered.");
+      }
       reorderCollection(collectionId, orderedKids);
     },
   );
@@ -876,6 +903,98 @@ function registerIpc(): void {
     "kara:collections-for-song",
     async (_e, kid: string) => {
       return collectionsForSong(kid);
+    },
+  );
+  // --- Remote-own playlists (feat 06) ---
+  // Sync the logged-in user's kara.moe playlists into `remote-own`
+  // collections. Logged out: returns the list unchanged, never throws.
+  ipcMain.handle(
+    "kara:collection-sync-remote-own",
+    async (_e, opts?: { filter?: string; order?: string }) => {
+      const acct = getAccount();
+      if (!acct) return listCollectionsWithCounts();
+      const order: PlaylistOrder = isPlaylistOrder(opts?.order)
+        ? opts!.order!
+        : "az";
+      const filter = (opts?.filter || "").trim();
+      const playlists = await getMyPlaylists(acct.username, { filter, order });
+      const keep: string[] = [];
+      for (const p of playlists) {
+        if (!p.plaid) continue;
+        keep.push(p.plaid);
+        upsertRemoteOwnPlaylist(
+          p.plaid,
+          (p.name || "(untitled playlist)").trim() || "(untitled playlist)",
+          p.username ?? acct.username,
+          playlistItemCount(p),
+        );
+      }
+      // Only prune on an unfiltered sync: a filtered response is a subset of the
+      // user's playlists, so pruning against it would delete every non-matching
+      // remote-own collection.
+      if (!filter) pruneRemoteOwnPlaylists(keep);
+      // Refresh the snapshot for playlists the user has opened before
+      // (already has snapshot rows). Sequential; one bad playlist must not
+      // fail the whole sync.
+      for (const plaid of keep) {
+        if (getRemotePlaylistItems(plaid).length === 0) continue;
+        try {
+          const items = await getPlaylistContents(plaid);
+          replaceRemotePlaylistItems(
+            plaid,
+            items.map((i) => ({
+              kid: i.kid,
+              position: i.pos,
+              title: i.title,
+              series: i.series,
+              singer: i.singer,
+              duration: i.duration,
+              payload: i.payload,
+            })),
+          );
+          replaceCollectionMembership(
+            plaid,
+            items.filter((i) => isDownloaded(i.kid)).map((i) => i.kid),
+            { touchSyncedAt: true },
+          );
+        } catch {
+          /* keep the previous snapshot */
+        }
+      }
+      return listCollectionsWithCounts();
+    },
+  );
+  // Browse a remote-own playlist: its songs in remote order, each flagged
+  // downloaded/not against the local `songs` table. First open fetches and
+  // stores the snapshot ("opened once" trigger).
+  ipcMain.handle(
+    "kara:collection-remote-items",
+    async (_e, collectionId: string) => {
+      const col = getCollection(collectionId);
+      if (!col || col.source !== "remote-own") return [];
+      let items = getRemotePlaylistItemsWithDownloaded(collectionId);
+      if (items.length === 0) {
+        const fetched = await getPlaylistContents(collectionId);
+        replaceRemotePlaylistItems(
+          collectionId,
+          fetched.map((i) => ({
+            kid: i.kid,
+            position: i.pos,
+            title: i.title,
+            series: i.series,
+            singer: i.singer,
+            duration: i.duration,
+            payload: i.payload,
+          })),
+        );
+        replaceCollectionMembership(
+          collectionId,
+          fetched.filter((i) => isDownloaded(i.kid)).map((i) => i.kid),
+          { touchSyncedAt: true },
+        );
+        items = getRemotePlaylistItemsWithDownloaded(collectionId);
+      }
+      return items;
     },
   );
 }

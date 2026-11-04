@@ -59,6 +59,18 @@ function openDb() {
 
     CREATE INDEX IF NOT EXISTS idx_collection_songs_kid ON collection_songs(kid);
 
+    CREATE TABLE IF NOT EXISTS remote_playlist_items (
+      collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+      kid TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      series TEXT NOT NULL DEFAULT '',
+      singer TEXT NOT NULL DEFAULT '',
+      duration INTEGER,
+      payload TEXT,
+      PRIMARY KEY (collection_id, kid)
+    );
+    CREATE INDEX IF NOT EXISTS idx_remote_playlist_items_collection ON remote_playlist_items(collection_id);
     CREATE TABLE IF NOT EXISTS account (
       id INTEGER PRIMARY KEY,
       username TEXT NOT NULL,
@@ -68,6 +80,13 @@ function openDb() {
       logged_in_at TEXT NOT NULL
     );
   `);
+  // Defensive column add for databases created before feat 06: the DDL above
+  // only runs CREATE TABLE IF NOT EXISTS, so an existing `collections` table
+  // would never gain the new column on its own.
+  const cols = sqlite.prepare("PRAGMA table_info(collections)").all() as { name: string }[];
+  if (!cols.some((c) => c.name === "remote_item_count")) {
+    sqlite.exec("ALTER TABLE collections ADD COLUMN remote_item_count INTEGER");
+  }
   return drizzle(sqlite, { schema });
 }
 

@@ -57,10 +57,25 @@ export interface CollectionRow {
   createdAt: string;
   updatedAt: string;
   lastSyncedAt: string | null;
+  remoteItemCount: number | null;
 }
 /** A collection row with its song count (from `kara:collections-list`). */
 export interface CollectionRowWithCount extends CollectionRow {
   songCount: number;
+}
+/** Allowed `order` values for the kara.moe playlist list (mirrors PlaylistOrder in src/kara-api.ts). */
+export type PlaylistOrder = 'az' | 'recent' | 'karacount' | 'duration' | 'username';
+/** One row of a remote playlist snapshot (mirrors the main-process shape). */
+export interface RemoteItemRow {
+  kid: string;
+  position: number;
+  title: string;
+  series: string;
+  singer: string;
+  duration: number | null;
+  payload: string | null;
+  /** True when the song is already in the local catalog. */
+  downloaded: boolean;
 }
 
 /**
@@ -251,6 +266,24 @@ const api = {
   /** Get the collections a given song belongs to. */
   collectionsForSong(kid: string): Promise<{ id: string; name: string }[]> {
     return ipcRenderer.invoke('kara:collections-for-song', kid);
+  },
+  // --- Remote-own playlists (feat 06) ------------------------------------
+  /**
+   * Sync the logged-in user's kara.moe playlists into `remote-own` collections.
+   * Returns the refreshed collection list. When logged out it resolves with the
+   * current list unchanged (never throws), so the Collections screen can call it
+   * unconditionally.
+   */
+  collectionSyncRemoteOwn(opts?: { filter?: string; order?: PlaylistOrder }): Promise<CollectionRowWithCount[]> {
+    return ipcRenderer.invoke('kara:collection-sync-remote-own', opts);
+  },
+  /**
+   * Ordered snapshot rows of a `remote-own` collection, each flagged
+   * `downloaded` against the global `songs` table. Fetches from kara.moe on
+   * first open. Resolves with [] for non-remote collections.
+   */
+  collectionRemoteItems(collectionId: string): Promise<RemoteItemRow[]> {
+    return ipcRenderer.invoke('kara:collection-remote-items', collectionId);
   },
 };
 

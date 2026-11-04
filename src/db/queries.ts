@@ -1,7 +1,7 @@
-import { eq, inArray, sql, and } from "drizzle-orm";
+import { eq, inArray, notInArray, sql, and } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { db } from "./index";
-import { songs, collections, collectionSongs, account } from "./schema";
+import { songs, collections, collectionSongs, remotePlaylistItems, account } from "./schema";
 
 /**
  * A catalog entry persisted locally for a downloaded song.
@@ -214,6 +214,7 @@ export interface CollectionRow {
   createdAt: string;
   updatedAt: string;
   lastSyncedAt: string | null;
+  remoteItemCount: number | null;
 }
 
 /** All collections ordered by name. */
@@ -232,6 +233,7 @@ export function listCollectionsWithCounts(): (CollectionRow & { songCount: numbe
       createdAt: collections.createdAt,
       updatedAt: collections.updatedAt,
       lastSyncedAt: collections.lastSyncedAt,
+      remoteItemCount: collections.remoteItemCount,
       songCount: sql<number>`count(${collectionSongs.kid})`,
     })
     .from(collections)
@@ -254,6 +256,7 @@ export function createLocalCollection(name: string): CollectionRow {
       createdAt: now,
       updatedAt: now,
       lastSyncedAt: null,
+      remoteItemCount: null,
     })
     .run();
   return {
@@ -264,6 +267,7 @@ export function createLocalCollection(name: string): CollectionRow {
     createdAt: now,
     updatedAt: now,
     lastSyncedAt: null,
+    remoteItemCount: null,
   };
 }
 
@@ -278,6 +282,206 @@ export function renameCollection(id: string, name: string): void {
 /** Delete a collection. `ON DELETE CASCADE` removes `collection_songs` rows. */
 export function deleteCollection(id: string): void {
   db.delete(collections).where(eq(collections.id, id)).run();
+}
+/** A single row in the `remote_playlist_items` snapshot table. */
+export interface RemotePlaylistItem {
+  kid: string;
+  position: number;
+  title: string;
+  series: string;
+  singer: string;
+  duration: number | null;
+  payload: string | null;
+}
+/**
+ * Upsert a `remote-own` collection keyed by the remote `plaid`. On insert
+ * `createdAt` is set; on update only `name`, `ownerUsername`,
+ * `remoteItemCount`, `updatedAt` and `lastSyncedAt` change — `createdAt`
+ * and `source` are never touched. Returns the resulting row.
+ */
+export function upsertRemoteOwnPlaylist(
+  plaid: string,
+  name: string,
+  ownerUsername: string | null,
+  remoteItemCount: number | null,
+): CollectionRow {
+  const now = new Date().toISOString();
+  db.insert(collections)
+    .values({
+      id: plaid,
+      name,
+      source: "remote-own",
+      ownerUsername,
+      createdAt: now,
+      updatedAt: now,
+      lastSyncedAt: now,
+      remoteItemCount,
+    })
+    .onConflictDoUpdate({
+      target: collections.id,
+      set: {
+        name,
+        ownerUsername,
+        remoteItemCount,
+        updatedAt: now,
+        lastSyncedAt: now,
+      },
+    })
+    .run();
+  const row = db.select().from(collections).where(eq(collections.id, plaid)).get();
+  if (!row) throw new Error(`upsertRemoteOwnPlaylist: row ${plaid} not found after upsert`);
+  return row;
+}
+/**
+ * Replace all membership rows for a collection with the given ordered kids.
+ * Deletes every existing `collection_songs` row for the collection, then
+ * reinserts each kid with its index as `position`. Bumps `updatedAt`
+ * always; bumps `lastSyncedAt` only when `opts.touchSyncedAt` is true.
+ * No-op if the collection row does not exist.
+ */
+export function replaceCollectionMembership(
+  collectionId: string,
+  orderedKids: string[],
+  opts: { touchSyncedAt: boolean },
+): void {
+  const col = db.select().from(collections).where(eq(collections.id, collectionId)).get();
+  if (!col) return;
+  const now = new Date().toISOString();
+  db.transaction((tx) => {
+    tx.delete(collectionSongs)
+      .where(eq(collectionSongs.collectionId, collectionId))
+      .run();
+    orderedKids.forEach((kid, position) => {
+      tx.insert(collectionSongs)
+        .values({ collectionId, kid, position })
+        .run();
+    });
+    const set: Record<string, unknown> = { updatedAt: now };
+    if (opts.touchSyncedAt) {
+      set.lastSyncedAt = now;
+    }
+    tx.update(collections).set(set).where(eq(collections.id, collectionId)).run();
+  });
+}
+/**
+ * Reorder the songs in a collection. Deletes all membership rows and
+ * reinserts them in the given order. Bumps `updatedAt`; bumps
+ * `lastSyncedAt` only for non-local collections (a purely local reorder
+ * is not a "sync").
+ */
+export function reorderCollection(collectionId: string, orderedKids: string[]): void {
+  const col = db.select().from(collections).where(eq(collections.id, collectionId)).get();
+  if (!col) return;
+  replaceCollectionMembership(collectionId, orderedKids, {
+    touchSyncedAt: col.source !== "local",
+  });
+}
+/**
+ * Replace the full remote playlist snapshot for a collection. Deletes all
+ * existing `remote_playlist_items` rows for the collection, then inserts
+ * the given items (position taken from `item.position`). Idempotent:
+ * calling twice with the same input does not duplicate rows.
+ */
+export function replaceRemotePlaylistItems(
+  collectionId: string,
+  items: RemotePlaylistItem[],
+): void {
+  db.transaction((tx) => {
+    tx.delete(remotePlaylistItems)
+      .where(eq(remotePlaylistItems.collectionId, collectionId))
+      .run();
+    items.forEach((item) => {
+      tx.insert(remotePlaylistItems)
+        .values({
+          collectionId,
+          kid: item.kid,
+          position: item.position,
+          title: item.title,
+          series: item.series,
+          singer: item.singer,
+          duration: item.duration,
+          payload: item.payload,
+        })
+        .run();
+    });
+  });
+}
+/** All remote playlist items for a collection, ordered by position asc. */
+export function getRemotePlaylistItems(collectionId: string): RemotePlaylistItem[] {
+  return db
+    .select()
+    .from(remotePlaylistItems)
+    .where(eq(remotePlaylistItems.collectionId, collectionId))
+    .orderBy(remotePlaylistItems.position)
+    .all();
+}
+/**
+ * Remote playlist items for a collection, each flagged with whether the
+ * song is already in the local `songs` table (left join on kid).
+ * Ordered by position asc.
+ */
+export function getRemotePlaylistItemsWithDownloaded(
+  collectionId: string,
+): (RemotePlaylistItem & { downloaded: boolean })[] {
+  const rows = db
+    .select({
+      item: remotePlaylistItems,
+      songKid: songs.kid,
+    })
+    .from(remotePlaylistItems)
+    .leftJoin(songs, eq(remotePlaylistItems.kid, songs.kid))
+    .where(eq(remotePlaylistItems.collectionId, collectionId))
+    .orderBy(remotePlaylistItems.position)
+    .all();
+  return rows.map((r) => ({
+    kid: r.item.kid,
+    position: r.item.position,
+    title: r.item.title,
+    series: r.item.series,
+    singer: r.item.singer,
+    duration: r.item.duration,
+    payload: r.item.payload,
+    downloaded: r.songKid !== null,
+  }));
+}
+/**
+ * Delete `remote-own` collections whose `id` (the remote `plaid`) is not in
+ * `keepPlaids`. When `keepPlaids` is empty, all `remote-own` rows are
+ * deleted. `ON DELETE CASCADE` removes `collection_songs` and
+ * `remote_playlist_items` rows only — never `songs` or files.
+ *
+ * Policy: rows for playlists that vanished upstream are DELETED (not marked
+ * stale). The prune is keyed on `plaid` membership in the fetched set
+ * rather than `ownerUsername` because with `includeUserAsContributor=true`
+ * a contributed playlist's `ownerUsername` is the real owner, not the
+ * logged-in user — keying on username would re-create and delete contributed
+ * playlists on every sync.
+ *
+ * Returns the number of deleted collections.
+ */
+export function pruneRemoteOwnPlaylists(keepPlaids: string[]): number {
+  const before = db
+    .select({ n: sql<number>`count(*)` })
+    .from(collections)
+    .where(eq(collections.source, "remote-own"))
+    .get()?.n ?? 0;
+  if (keepPlaids.length === 0) {
+    db.delete(collections).where(eq(collections.source, "remote-own")).run();
+  } else {
+    db.delete(collections)
+      .where(and(eq(collections.source, "remote-own"), notInArray(collections.id, keepPlaids)))
+      .run();
+  }
+  const after = db
+    .select({ n: sql<number>`count(*)` })
+    .from(collections)
+    .where(eq(collections.source, "remote-own"))
+    .get()?.n ?? 0;
+  return before - after;
+}
+/** A single collection by id, or undefined if not found. */
+export function getCollection(id: string): CollectionRow | undefined {
+  return db.select().from(collections).where(eq(collections.id, id)).get();
 }
 
 /** Songs in a collection, ordered by position. */
@@ -313,33 +517,6 @@ export function removeSongFromCollection(collectionId: string, kid: string): voi
     )
     .run();
 }
-/**
- * Reorder the songs in a collection. Deletes all membership rows and
- * reinserts them in the given order. Bumps `updatedAt`; bumps
- * `lastSyncedAt` only for non-local collections (a purely local reorder
- * is not a "sync").
- */
-export function reorderCollection(collectionId: string, orderedKids: string[]): void {
-  const col = db.select().from(collections).where(eq(collections.id, collectionId)).get();
-  if (!col) return;
-  const now = new Date().toISOString();
-  db.transaction((tx) => {
-    tx.delete(collectionSongs)
-      .where(eq(collectionSongs.collectionId, collectionId))
-      .run();
-    orderedKids.forEach((kid, position) => {
-      tx.insert(collectionSongs)
-        .values({ collectionId, kid, position })
-        .run();
-    });
-    const set: Record<string, unknown> = { updatedAt: now };
-    if (col.source !== "local") {
-      set.lastSyncedAt = now;
-    }
-    tx.update(collections).set(set).where(eq(collections.id, collectionId)).run();
-  });
-}
-
 /** Collections a given song belongs to (id + name). */
 export function collectionsForSong(kid: string): { id: string; name: string }[] {
   return db
