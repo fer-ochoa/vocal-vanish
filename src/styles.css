@@ -499,6 +499,76 @@ body {
   color: #fff;
 }
 
+/* --- Collections tabs (Local / Public / Mine) ------------------------------ */
+.coll-tabs {
+  display: flex;
+  gap: 6px;
+  margin: 18px 0 16px;
+}
+
+.coll-tab {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px 18px;
+  font-size: 15px;
+  font-weight: 600;
+  font-family: inherit;
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.coll-tab:hover:not(:disabled) {
+  background: #262c37;
+  color: var(--text);
+}
+
+.coll-tab.active {
+  background: var(--accent);
+  border-color: var(--accent-2);
+  color: #fff;
+}
+
+.coll-tab:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.coll-tab-count {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.coll-tab.active .coll-tab-count {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* Toolbars inside the collections panels. */
+.new-collection {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.input-sm {
+  flex: 0 1 200px;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
 /* --- Lyricless placeholder -------------------------------------------------- */
 .lyricless-placeholder {
   margin-top: 40px;

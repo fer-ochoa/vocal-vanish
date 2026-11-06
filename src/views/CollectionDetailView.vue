@@ -1,6 +1,7 @@
 <template>
   <div class="screen">
     <header class="screen-head">
+      <button class="btn btn-ghost back-link" title="Back to collections" @click="goBack">← Collections</button>
       <h1>{{ collection ? collection.name : 'Collection' }}</h1>
       <p class="muted">
         <span class="tag" :class="sourceBadgeClass(collection ? collection.source : 'local')">{{ collection ? collection.source : '…' }}</span>
@@ -160,6 +161,13 @@ import { useRoute, useRouter } from 'vue-router';
 const route = useRoute();
 const router = useRouter();
 const collectionId = route.params.id as string;
+const tabFrom = computed(() => {
+  const t = String(route.query.from ?? '');
+  return t === 'public' || t === 'mine' ? t : 'local';
+});
+function goBack(): void {
+  router.push({ name: 'collections', query: { tab: tabFrom.value } });
+}
 const collection = ref<any>(null);
 const songs = ref<any[]>([]);
 const rows = ref<any[]>([]);
@@ -359,8 +367,17 @@ onMounted(load);
 // Reload if the route param changes (e.g. navigating between collections)
 watch(() => route.params.id, (newId) => {
   if (newId && newId !== collectionId) {
-    // Re-navigate to the new collection
-    router.replace({ name: 'collection-detail', params: { id: newId } });
+    // Re-navigate to the new collection, preserving the query string
+    // (e.g. the `from` tab hint) so it survives subscribe/sync re-navigation.
+    router.replace({ name: 'collection-detail', params: { id: newId }, query: { ...route.query } });
   }
 });
 </script>
+<style scoped>
+.back-link {
+  padding: 4px 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  align-self: flex-start;
+}
+</style>
