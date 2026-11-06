@@ -33,13 +33,18 @@ import {
   isDownloaded,
   missingKidsForBulkDownload,
   addSongToCollectionAt,
+  upsertSubscribedCollection,
+  setCollectionRemoteStale,
+  type RemotePlaylistItem,
 } from "./db/queries";
 import {
   getMyPlaylists,
+  getUserPlaylists,
   getPlaylistContents,
   isPlaylistOrder,
   playlistItemCount,
   type PlaylistOrder,
+  type RemotePlaylist,
 } from "./kara-api";
 import { runLegacyImport } from "./db/legacy-import";
 import { runLegacyFolderMigration } from "./db/legacy-folder-migration";
@@ -982,16 +987,139 @@ function registerIpc(): void {
       return listCollectionsWithCounts();
     },
   );
-  // Browse a remote-own playlist: its songs in remote order, each flagged
-  // downloaded/not against the local `songs` table. First open fetches and
-  // stores the snapshot ("opened once" trigger).
+  // Browse a remote playlist (remote-own or remote-subscribed): its songs in
+  // remote order, each flagged downloaded/not against the local `songs`
+  // table. First open fetches and stores the snapshot ("opened once"
+  // trigger). For `remote-subscribed`, a fetch failure marks the collection
+  // stale and returns [] (the detail view must still render the local row).
   ipcMain.handle(
     "kara:collection-remote-items",
     async (_e, collectionId: string) => {
       const col = getCollection(collectionId);
-      if (!col || col.source !== "remote-own") return [];
+      if (!col || (col.source !== "remote-own" && col.source !== "remote-subscribed"))
+        return [];
       let items = getRemotePlaylistItemsWithDownloaded(collectionId);
       if (items.length === 0) {
+        try {
+          const fetched = await getPlaylistContents(collectionId);
+          replaceRemotePlaylistItems(
+            collectionId,
+            fetched.map((i) => ({
+              kid: i.kid,
+              position: i.pos,
+              title: i.title,
+              series: i.series,
+              singer: i.singer,
+              duration: i.duration,
+              payload: i.payload,
+            })),
+          );
+          replaceCollectionMembership(
+            collectionId,
+            fetched.filter((i) => isDownloaded(i.kid)).map((i) => i.kid),
+            { touchSyncedAt: true },
+          );
+          items = getRemotePlaylistItemsWithDownloaded(collectionId);
+        } catch {
+          // Subscribed playlist deleted / made private: flag stale, keep the
+          // local row, and let the detail view render it (empty snapshot).
+          if (col.source === "remote-subscribed") {
+            setCollectionRemoteStale(collectionId, true);
+          }
+          return [];
+        }
+      }
+      return items;
+    },
+  );
+  // --- Remote-subscribed playlists (feat 08) -----------------------------
+  // Browse another user's public kara.moe playlists and "subscribe" to one
+  // locally (a `remote-subscribed` collection). Pure discovery + local
+  // persistence; no auth required (public routes).
+  // Browse a user's public playlists. Pure discovery: no DB writes, no auth
+  // (works logged out). Errors are surfaced to the renderer, not swallowed.
+  ipcMain.handle(
+    "kara:collection-browse-user",
+    async (
+      _e,
+      opts: {
+        username: string;
+        filter?: string;
+        order?: string;
+        includeContributions?: boolean;
+        refresh?: boolean;
+      },
+    ): Promise<RemotePlaylist[]> => {
+      const username = (opts?.username || "").trim();
+      if (!username) throw new Error("Username is required.");
+      const order: PlaylistOrder = isPlaylistOrder(opts?.order)
+        ? opts!.order!
+        : "az";
+      return getUserPlaylists(username, {
+        filter: opts?.filter,
+        order,
+        includeContributions: opts?.includeContributions,
+        refresh: opts?.refresh,
+      });
+    },
+  );
+  // Subscribe to a remote playlist: upsert the `remote-subscribed` row, fetch
+  // its contents, persist the ordered snapshot + membership, return the row.
+  // Idempotent — subscribing twice must not duplicate the row or snapshot.
+  ipcMain.handle(
+    "kara:collection-subscribe",
+    async (
+      _e,
+      params: { plaid: string; name?: string; ownerUsername?: string | null },
+    ) => {
+      const plaid = (params?.plaid || "").trim();
+      if (!plaid) throw new Error("Playlist id is required.");
+      // Fetch FIRST so a bad/private plaid fails before any DB write.
+      const items = await getPlaylistContents(plaid);
+      upsertSubscribedCollection(
+        plaid,
+        (params?.name || "(untitled playlist)").trim() || "(untitled playlist)",
+        params?.ownerUsername ?? null,
+        items.length,
+      );
+      replaceRemotePlaylistItems(
+        plaid,
+        items.map((i) => ({
+          kid: i.kid,
+          position: i.pos,
+          title: i.title,
+          series: i.series,
+          singer: i.singer,
+          duration: i.duration,
+          payload: i.payload,
+        })),
+      );
+      replaceCollectionMembership(
+        plaid,
+        items.filter((i) => isDownloaded(i.kid)).map((i) => i.kid),
+        { touchSyncedAt: true },
+      );
+      const row = getCollection(plaid);
+      if (!row) throw new Error("Collection not found after subscribe.");
+      return row;
+    },
+  );
+  // Re-sync a subscribed collection from kara.moe. On success refresh the
+  // snapshot + membership and clear the stale flag; on failure (playlist
+  // deleted / made private) mark it stale and return the persisted snapshot —
+  // never delete the collection or its songs.
+  ipcMain.handle(
+    "kara:collection-sync-subscribed",
+    async (
+      _e,
+      collectionId: string,
+    ): Promise<{ items: RemotePlaylistItem[]; stale: boolean }> => {
+      const col = getCollection(collectionId);
+      if (!col || col.source !== "remote-subscribed") {
+        return { items: [], stale: false };
+      }
+      let stale = false;
+      try {
         const fetched = await getPlaylistContents(collectionId);
         replaceRemotePlaylistItems(
           collectionId,
@@ -1010,9 +1138,21 @@ function registerIpc(): void {
           fetched.filter((i) => isDownloaded(i.kid)).map((i) => i.kid),
           { touchSyncedAt: true },
         );
-        items = getRemotePlaylistItemsWithDownloaded(collectionId);
+        setCollectionRemoteStale(collectionId, false);
+        // Refresh `remoteItemCount` from the freshly-fetched count.
+        upsertSubscribedCollection(
+          collectionId,
+          col.name,
+          col.ownerUsername,
+          fetched.length,
+        );
+      } catch {
+        // Playlist deleted or made private: keep the local row + snapshot,
+        // just flag it stale.
+        setCollectionRemoteStale(collectionId, true);
+        stale = true;
       }
-      return items;
+      return { items: getRemotePlaylistItemsWithDownloaded(collectionId), stale };
     },
   );
   // Bulk-download every song in a collection that is not yet in the local
@@ -1028,7 +1168,7 @@ function registerIpc(): void {
 
       // Build the ordered target kid list.
       let targetKids: string[];
-      if (col.source === "remote-own") {
+      if (col.source === "remote-own" || col.source === "remote-subscribed") {
         // Re-sync first so a stale snapshot doesn't skip newly-added songs.
         // If the fetch throws, fall back to the already-persisted snapshot
         // rather than failing the whole operation.
@@ -1050,6 +1190,11 @@ function registerIpc(): void {
             .sort((a, b) => a.pos - b.pos)
             .map((i) => i.kid);
         } catch {
+          // Subscribed playlist deleted / made private: flag it stale, then
+          // fall back to the persisted snapshot.
+          if (col.source === "remote-subscribed") {
+            setCollectionRemoteStale(collectionId, true);
+          }
           targetKids = getRemotePlaylistItems(collectionId).map((i) => i.kid);
         }
         // Dedupe while preserving order.
@@ -1060,7 +1205,7 @@ function registerIpc(): void {
           return true;
         });
       } else {
-        // local / remote-subscribed: use the persisted membership rows.
+        // local: use the persisted membership rows.
         targetKids = getCollectionSongs(collectionId).map((s) => s.kid);
       }
 

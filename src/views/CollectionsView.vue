@@ -38,6 +38,71 @@
         {{ busy ? '…' : 'Create' }}
       </button>
     </div>
+    <!-- Browse a kara.moe user (feat 08) — public data, works logged out -->
+    <details class="browse-panel">
+      <summary class="browse-summary">Browse a kara.moe user</summary>
+      <div class="browse-controls">
+        <input
+          v-model.trim="browseUsername"
+          class="input input-sm"
+          placeholder="Username…"
+          spellcheck="false"
+          @keyup.enter="browseUser()"
+        />
+        <button class="btn btn-primary" :disabled="!browseUsername || browsing" @click="browseUser()">
+          {{ browsing ? 'Browsing…' : 'Browse' }}
+        </button>
+        <input
+          v-model.trim="browseFilter"
+          class="input input-sm"
+          placeholder="Filter…"
+          spellcheck="false"
+        />
+        <select v-model="browseOrder" class="input input-sm" title="Sort order">
+          <option value="az">Name (A–Z)</option>
+          <option value="recent">Recently created</option>
+          <option value="karacount">Most songs</option>
+          <option value="duration">Longest</option>
+          <option value="username">Owner</option>
+        </select>
+        <button class="btn" :disabled="!hasBrowsed || browsing" @click="refreshBrowse">
+          Refresh
+        </button>
+        <label class="browse-check">
+          <input v-model="browseIncludeContributions" type="checkbox" />
+          Include playlists they contribute to
+        </label>
+      </div>
+      <!-- Browse results -->
+      <div v-if="browsing" class="muted small browse-state">Browsing…</div>
+      <div v-else-if="browseError" class="browse-state browse-error">{{ browseError }}</div>
+      <div v-else-if="hasBrowsed && !browseResults.length" class="muted small browse-state">
+        No public playlists for {{ browseUsername }}.
+      </div>
+      <ul v-else-if="browseResults.length" class="list browse-list">
+        <li v-for="pl in browseResults" :key="pl.plaid" class="row">
+          <div class="row-main">
+            <div class="row-title">{{ pl.name }}</div>
+            <div class="row-sub">
+              <span class="muted small">{{ pl.karacount ?? 0 }} songs</span>
+              <span v-if="pl.duration != null" class="dur">{{ fmtBrowseDuration(pl.duration) }}</span>
+              <span class="muted small">by {{ pl.nickname || pl.username || 'unknown' }}</span>
+              <span v-if="isSharedBy(pl)" class="tag tag-dim">shared by {{ pl.username }}</span>
+            </div>
+          </div>
+          <div class="row-actions">
+            <button
+              class="btn btn-ghost"
+              :disabled="isSubscribed(pl) || subscribingPlaid === pl.plaid"
+              @click.stop="subscribe(pl)"
+            >
+              {{ subscribingPlaid === pl.plaid ? '…' : isSubscribed(pl) ? 'Subscribed' : 'Subscribe' }}
+            </button>
+            <span v-if="subscribeError[pl.plaid]" class="browse-row-error">{{ subscribeError[pl.plaid] }}</span>
+          </div>
+        </li>
+      </ul>
+    </details>
     <!-- Collection list -->
     <ul v-if="visibleCollections.length" class="list">
       <li
@@ -52,11 +117,12 @@
             <div class="row-title">{{ col.name }}</div>
             <div class="row-sub">
               <span class="tag" :class="sourceBadgeClass(col.source)">{{ col.source }}</span>
-              <!-- remote-own: "X of Y downloaded" + owner + synced ago -->
-              <template v-if="col.source === 'remote-own'">
+              <!-- remote (own/subscribed): "X of Y downloaded" + owner + synced ago -->
+              <template v-if="col.source === 'remote-own' || col.source === 'remote-subscribed'">
                 <span class="muted small">{{ col.songCount }} of {{ col.remoteItemCount ?? col.songCount }} downloaded</span>
                 <span v-if="col.ownerUsername && col.ownerUsername !== username" class="muted small">by {{ col.ownerUsername }}</span>
                 <span v-if="col.lastSyncedAt" class="muted small">{{ syncedAgo(col.lastSyncedAt) }}</span>
+                <span v-if="col.remoteStale === true" class="tag tag-dim" title="This playlist is no longer public on kara.moe">no longer public</span>
               </template>
               <!-- local: bare count -->
               <span v-else class="muted small">{{ col.songCount }} song{{ col.songCount === 1 ? '' : 's' }}</span>
@@ -75,7 +141,7 @@
         </div>
         <div class="row-actions">
           <!-- Local rows: rename + delete -->
-          <template v-if="col.source !== 'remote-own'">
+          <template v-if="col.source === 'local'">
             <button
               v-if="renamingId !== col.id"
               class="btn btn-ghost"
@@ -88,9 +154,17 @@
               <button class="btn btn-ghost" title="Save" @click.stop="confirmRename(col.id)">✓</button>
               <button class="btn btn-ghost" title="Cancel" @click.stop="cancelRename">✕</button>
             </template>
-            <button class="btn btn-ghost" title="Delete" @click.stop="remove(col.id, col.name)">✕</button>
           </template>
-          <!-- remote-own: no actions (read-only mirror of kara.moe) -->
+          <!-- local + remote-subscribed: delete (unsubscribe for subscribed rows) -->
+          <button
+            v-if="col.source === 'local' || col.source === 'remote-subscribed'"
+            class="btn btn-ghost"
+            title="Delete"
+            @click.stop="remove(col.id, col.name)"
+          >
+            ✕
+          </button>
+          <!-- remote-own: no actions (read-only mirror of kara.moe); remote-subscribed: unsubscribe only -->
         </div>
       </li>
     </ul>
@@ -102,8 +176,9 @@
   </div>
 </template>
 <script setup lang="ts">
-import { onMounted, ref, nextTick, computed } from 'vue';
+import { onMounted, ref, nextTick, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
+import type { RemotePlaylist, PlaylistOrder } from '../preload';
 const router = useRouter();
 const collections = ref<any[]>([]);
 const loaded = ref(false);
@@ -162,6 +237,88 @@ const lastSyncedLabel = computed(() => {
   const latest = Math.max(...times);
   return syncedAgo(new Date(latest).toISOString());
 });
+
+// --- Browse a kara.moe user (feat 08) --------------------------------------
+const browseUsername = ref('');
+const browseFilter = ref('');
+const browseOrder = ref<PlaylistOrder>('az');
+const browseIncludeContributions = ref(true);
+const browsing = ref(false);
+const hasBrowsed = ref(false);
+const browseResults = ref<RemotePlaylist[]>([]);
+const browseError = ref('');
+const subscribingPlaid = ref<string | null>(null);
+const subscribeError = ref<Record<string, string>>({});
+
+async function browseUser(refresh = false): Promise<void> {
+  if (!browseUsername.value || browsing.value) return;
+  browsing.value = true;
+  browseError.value = '';
+  try {
+    browseResults.value = await window.kara.collectionBrowseUser({
+      username: browseUsername.value,
+      filter: browseFilter.value || undefined,
+      order: browseOrder.value,
+      includeContributions: browseIncludeContributions.value,
+      refresh,
+    });
+    hasBrowsed.value = true;
+  } catch (e) {
+    browseError.value = (e as Error).message || 'Failed to browse playlists';
+  } finally {
+    browsing.value = false;
+  }
+}
+
+function refreshBrowse(): void {
+  void browseUser(true);
+}
+
+/** Re-fetch (debounced ~300 ms) when filter/order change after a first browse. */
+let browseDebounce: ReturnType<typeof setTimeout> | null = null;
+watch([browseFilter, browseOrder, browseIncludeContributions], () => {
+  if (!hasBrowsed.value || !browseUsername.value) return;
+  if (browseDebounce) clearTimeout(browseDebounce);
+  browseDebounce = setTimeout(() => {
+    void browseUser();
+  }, 300);
+});
+
+function isSharedBy(pl: RemotePlaylist): boolean {
+  if (!pl.username || !browseUsername.value) return false;
+  return pl.username.toLowerCase() !== browseUsername.value.toLowerCase();
+}
+
+function isSubscribed(pl: RemotePlaylist): boolean {
+  return collections.value.some((c: any) => c.id === pl.plaid);
+}
+
+async function subscribe(pl: RemotePlaylist): Promise<void> {
+  if (subscribingPlaid.value || isSubscribed(pl)) return;
+  subscribingPlaid.value = pl.plaid;
+  const errKey = pl.plaid;
+  delete subscribeError.value[errKey];
+  try {
+    await window.kara.collectionSubscribe({
+      plaid: pl.plaid,
+      name: pl.name,
+      ownerUsername: pl.username ?? null,
+    });
+    await load();
+  } catch (e) {
+    subscribeError.value = { ...subscribeError.value, [errKey]: (e as Error).message || 'Failed to subscribe' };
+  } finally {
+    subscribingPlaid.value = null;
+  }
+}
+
+function fmtBrowseDuration(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
 
 // --- Open detail (feat 05) -------------------------------------------------
 function openDetail(id: string): void {
@@ -258,3 +415,56 @@ onMounted(() => {
   load();
 });
 </script>
+<style scoped>
+.browse-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+.browse-summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--muted);
+  user-select: none;
+}
+.browse-summary:hover {
+  color: var(--text);
+}
+.browse-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+.browse-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.browse-state {
+  margin-top: 10px;
+}
+.browse-error {
+  color: #e07a78;
+  font-size: 13px;
+}
+.browse-list {
+  margin-top: 10px;
+}
+.browse-row-error {
+  color: #e07a78;
+  font-size: 12px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+</style>

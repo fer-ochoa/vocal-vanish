@@ -6,6 +6,8 @@
         <span class="tag" :class="sourceBadgeClass(collection ? collection.source : 'local')">{{ collection ? collection.source : '…' }}</span>
         <span v-if="isRemote" class="muted small">{{ downloadedCount }} of {{ rows.length }} downloaded</span>
         <span v-else class="muted small">{{ songs.length }} song{{ songs.length === 1 ? '' : 's' }}</span>
+        <span v-if="isSubscribed && collection?.ownerUsername" class="muted small">by {{ collection.ownerUsername }}</span>
+        <span v-if="isSubscribed && collection?.lastSyncedAt" class="muted small">{{ syncedAgo(collection.lastSyncedAt) }}</span>
       </p>
       <button
         v-if="isRemote"
@@ -15,7 +17,19 @@
       >
         Download all missing ({{ missingCount }})
       </button>
+      <button
+        v-if="isSubscribed"
+        class="btn"
+        :disabled="syncing"
+        @click="syncNow"
+      >
+        {{ syncing ? 'Syncing…' : 'Sync now' }}
+      </button>
     </header>
+    <!-- Stale banner (feat 08) -->
+    <div v-if="stale" class="stale-banner">
+      This playlist is no longer public on kara.moe — showing the last synced copy.
+    </div>
     <!-- Local collections -->
     <ul v-if="!isRemote && songs.length" class="list">
       <li v-for="(entry, idx) in songs" :key="entry.kid" class="row">
@@ -93,7 +107,7 @@
       </li>
     </ul>
     <!-- Empty states -->
-    <p v-if="loaded && isRemote && !rows.length" class="muted">This playlist is empty on kara.moe.</p>
+    <p v-if="loaded && isRemote && !rows.length" class="muted">{{ stale ? 'This playlist is no longer public on kara.moe, and no copy of its contents was saved.' : 'This playlist is empty on kara.moe.' }}</p>
     <p v-if="loaded && !isRemote && !songs.length" class="muted">No songs in this collection yet.</p>
     <!-- Bulk download progress overlay -->
     <transition name="fade">
@@ -152,7 +166,12 @@ const rows = ref<any[]>([]);
 const loaded = ref(false);
 const busy = ref(false);
 const error = ref('');
-const isRemote = computed(() => collection.value?.source === 'remote-own');
+const isRemote = computed(() =>
+  collection.value?.source === 'remote-own' || collection.value?.source === 'remote-subscribed'
+);
+const isSubscribed = computed(() => collection.value?.source === 'remote-subscribed');
+const stale = ref(false);
+const syncing = ref(false);
 const downloadedCount = computed(() => rows.value.filter((r: any) => r.downloaded).length);
 // Songs in the collection not yet in the local library. Local collections can
 // only contain already-downloaded songs, so only remote-own can have a gap.
@@ -165,8 +184,10 @@ async function load(): Promise<void> {
     const cols = await window.kara.collectionsList();
     collection.value = cols.find((c: any) => c.id === collectionId) || null;
     // Load songs in order
-    if (collection.value && collection.value.source === 'remote-own') {
+    if (collection.value && (collection.value.source === 'remote-own' || collection.value.source === 'remote-subscribed')) {
       rows.value = await window.kara.collectionRemoteItems(collectionId);
+      // Show stale banner on load if the row is already marked stale
+      stale.value = collection.value.remoteStale === true;
     } else {
       songs.value = await window.kara.collectionSongs(collectionId);
     }
@@ -285,6 +306,24 @@ async function downloadAllMissing(): Promise<void> {
 function closeBulkSummary(): void {
   bulkSummary.value = null;
 }
+// --- Sync subscribed collection (feat 08) ----------------------------------
+async function syncNow(): Promise<void> {
+  if (syncing.value) return;
+  syncing.value = true;
+  error.value = '';
+  try {
+    const result = await window.kara.collectionSyncSubscribed(collectionId);
+    rows.value = result.items;
+    stale.value = result.stale;
+    // Refresh the collection row to pick up updated lastSyncedAt
+    const cols = await window.kara.collectionsList();
+    collection.value = cols.find((c: any) => c.id === collectionId) || collection.value;
+  } catch (e) {
+    error.value = (e as Error).message || 'Failed to sync playlist';
+  } finally {
+    syncing.value = false;
+  }
+}
 // --- Helpers ---------------------------------------------------------------
 function sourceBadgeClass(source: string): string {
   if (source === 'local') return 'tag-accent';
@@ -305,6 +344,16 @@ function fmtDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${m}:${s.toString().padStart(2, '0')}`;
+}
+function syncedAgo(iso: string | null): string {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return '';
+  const diff = Date.now() - t;
+  if (diff < 60_000) return 'synced just now';
+  if (diff < 3_600_000) return `synced ${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `synced ${Math.floor(diff / 3_600_000)}h ago`;
+  return `synced on ${iso.slice(0, 10)}`;
 }
 onMounted(load);
 // Reload if the route param changes (e.g. navigating between collections)

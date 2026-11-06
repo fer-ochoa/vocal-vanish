@@ -117,6 +117,13 @@ export interface RemotePlaylist {
   /** Owner username (may differ from the logged-in user for contributed playlists). */
   username?: string | null;
   nickname?: string | null;
+  /** Whether the playlist is visible (public). */
+  flag_visible?: boolean | null;
+  /**
+   * Whether the playlist is visible online. Entries with this explicitly
+   * `false` are dropped client-side as a cheap defensive filter.
+   */
+  flag_visible_online?: boolean | null;
 }
 
 /**
@@ -225,6 +232,133 @@ export async function getMyPlaylists(
       break;
   }
 
+  return playlists;
+}
+// ---------------------------------------------------------------------------
+// Public user playlists (feat 08: browse & subscribe to another user)
+// ---------------------------------------------------------------------------
+/**
+ * Session cache for {@link getUserPlaylists}, keyed by
+ * `${username.toLowerCase()}|${filter}|${order}|${includeContributions}`.
+ * Only successful results are stored; a throw never caches.
+ */
+const userPlaylistsCache = new Map<string, RemotePlaylist[]>();
+/**
+ * Clear the in-memory {@link getUserPlaylists} cache.
+ */
+export function clearUserPlaylistsCache(): void {
+  userPlaylistsCache.clear();
+}
+/**
+ * Fetch another user's public kara.moe playlists.
+ *
+ * Calls `GET {API_BASE}/playlist?filter=<filter>&order=<order>&byUsername=<username>`
+ * with `includeUserAsContributor=true` added ONLY when
+ * `opts.includeContributions !== false` (the param is presence-only:
+ * `=false` does NOT exclude contributions, only omitting it does).
+ *
+ * - `order` defaults to `"az"`; validated with {@link isPlaylistOrder} and
+ *   thrown before any network call (a bad order is a programmer error; the
+ *   server answers 400 INVALID_DATA).
+ * - Throws if `username` is empty/whitespace.
+ * - The route returns a flat JSON array; a `{content: [...]}` envelope is
+ *   tolerated defensively but the array is the real shape.
+ * - Entries with `flag_visible_online === false` are dropped defensively
+ *   (missing/true are kept).
+ * - Results are sorted client-side so the label matches the data:
+ *   - "az" → name asc (localeCompare)
+ *   - "recent" → created_at DESC (the server returns it ascending, so reverse)
+ *   - "karacount" → karacount DESC
+ *   - "duration" → duration DESC
+ *   - "username" → username asc
+ * - Results are cached in memory for the session, keyed by
+ *   username (lowercased) + filter + order + includeContributions. A cached
+ *   array is returned when present and `opts.refresh` is not true; otherwise
+ *   the route is fetched and the result stored.
+ *
+ * NOTE: No `Authorization` header is sent. These routes are public; any
+ * invalid/stale Authorization header turns them into 403.
+ */
+export async function getUserPlaylists(
+  username: string,
+  opts?: {
+    filter?: string;
+    order?: PlaylistOrder;
+    includeContributions?: boolean;
+    refresh?: boolean;
+  },
+): Promise<RemotePlaylist[]> {
+  if (!username || username.trim() === "") {
+    throw new Error("username must not be empty");
+  }
+  const order: PlaylistOrder = opts?.order ?? "az";
+  if (!isPlaylistOrder(order)) {
+    throw new Error(`Unknown playlist order '${order}'`);
+  }
+  const filter = opts?.filter ?? "";
+  const includeContributions = opts?.includeContributions !== false;
+  const cacheKey = `${username.toLowerCase()}|${filter}|${order}|${includeContributions}`;
+  if (!opts?.refresh) {
+    const cached = userPlaylistsCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+  }
+  const url = new URL(`${API_BASE}/playlist`);
+  url.searchParams.set("filter", filter);
+  url.searchParams.set("order", order);
+  url.searchParams.set("byUsername", username);
+  // Presence-only flag: `=false` does NOT exclude contributions, only
+  // omitting the param does — so set it only when contributions are wanted.
+  if (includeContributions) {
+    url.searchParams.set("includeUserAsContributor", "true");
+  }
+  const data = await httpGetJson<unknown>(url.toString());
+  // The route returns a flat JSON array. Defensively tolerate a
+  // {content: [...]} envelope, but the array is the real shape.
+  let playlists: RemotePlaylist[];
+  if (Array.isArray(data)) {
+    playlists = data as RemotePlaylist[];
+  } else if (
+    data &&
+    typeof data === "object" &&
+    Array.isArray((data as { content?: unknown[] }).content)
+  ) {
+    playlists = (data as { content: RemotePlaylist[] }).content;
+  } else {
+    playlists = [];
+  }
+  // Defensive filter: drop entries explicitly hidden online.
+  playlists = playlists.filter((p) => p.flag_visible_online !== false);
+  // Client-side sort so the label matches the data.
+  // The server's `order=recent` returns created_at ASCENDING (a quirk
+  // observed in a live probe), so we reverse to get "most recent first".
+  switch (order) {
+    case "az":
+      playlists.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+      break;
+    case "recent":
+      // Server returns created_at ascending; reverse for "most recent first".
+      playlists.sort((a, b) => {
+        const ca = a.created_at || "";
+        const cb = b.created_at || "";
+        return cb.localeCompare(ca);
+      });
+      break;
+    case "karacount":
+      playlists.sort((a, b) => (b.karacount ?? 0) - (a.karacount ?? 0));
+      break;
+    case "duration":
+      playlists.sort((a, b) => (b.duration ?? 0) - (a.duration ?? 0));
+      break;
+    case "username":
+      playlists.sort((a, b) =>
+        (a.username || "").localeCompare(b.username || ""),
+      );
+      break;
+  }
+  // Cache only successful results (a throw never reaches this line).
+  userPlaylistsCache.set(cacheKey, playlists);
   return playlists;
 }
 

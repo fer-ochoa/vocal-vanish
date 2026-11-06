@@ -215,6 +215,7 @@ export interface CollectionRow {
   updatedAt: string;
   lastSyncedAt: string | null;
   remoteItemCount: number | null;
+  remoteStale: boolean;
 }
 
 /**
@@ -252,6 +253,7 @@ export function listCollectionsWithCounts(): (CollectionRow & { songCount: numbe
       updatedAt: collections.updatedAt,
       lastSyncedAt: collections.lastSyncedAt,
       remoteItemCount: collections.remoteItemCount,
+      remoteStale: collections.remoteStale,
       songCount: sql<number>`count(${collectionSongs.kid})`,
     })
     .from(collections)
@@ -275,6 +277,7 @@ export function createLocalCollection(name: string): CollectionRow {
       updatedAt: now,
       lastSyncedAt: null,
       remoteItemCount: null,
+      remoteStale: false,
     })
     .run();
   return {
@@ -286,6 +289,7 @@ export function createLocalCollection(name: string): CollectionRow {
     updatedAt: now,
     lastSyncedAt: null,
     remoteItemCount: null,
+    remoteStale: false,
   };
 }
 
@@ -334,6 +338,7 @@ export function upsertRemoteOwnPlaylist(
       updatedAt: now,
       lastSyncedAt: now,
       remoteItemCount,
+      remoteStale: false,
     })
     .onConflictDoUpdate({
       target: collections.id,
@@ -349,6 +354,61 @@ export function upsertRemoteOwnPlaylist(
   const row = db.select().from(collections).where(eq(collections.id, plaid)).get();
   if (!row) throw new Error(`upsertRemoteOwnPlaylist: row ${plaid} not found after upsert`);
   return row;
+}
+/**
+ * Upsert a `remote-subscribed` collection keyed by the remote `plaid`.
+ * On insert `createdAt` is set; on update only `name`, `ownerUsername`,
+ * `remoteItemCount`, `updatedAt`, `lastSyncedAt` and `remoteStale`
+ * change — `createdAt` and `source` are never touched, so re-subscribing
+ * an existing `remote-own` row does not silently convert it. Returns the
+ * resulting row.
+ */
+export function upsertSubscribedCollection(
+  plaid: string,
+  name: string,
+  ownerUsername: string | null,
+  remoteItemCount: number | null,
+): CollectionRow {
+  const now = new Date().toISOString();
+  db.insert(collections)
+    .values({
+      id: plaid,
+      name,
+      source: "remote-subscribed",
+      ownerUsername,
+      createdAt: now,
+      updatedAt: now,
+      lastSyncedAt: now,
+      remoteItemCount,
+      remoteStale: false,
+    })
+    .onConflictDoUpdate({
+      target: collections.id,
+      set: {
+        name,
+        ownerUsername,
+        remoteItemCount,
+        updatedAt: now,
+        lastSyncedAt: now,
+        remoteStale: false,
+      },
+    })
+    .run();
+  const row = db.select().from(collections).where(eq(collections.id, plaid)).get();
+  if (!row) throw new Error(`upsertSubscribedCollection: row ${plaid} not found after upsert`);
+  return row;
+}
+/**
+ * Mark a collection's remote playlist as stale (no longer public / could
+ * not be fetched on the last sync) or clear the flag. Updates only
+ * `remote_stale`; does NOT bump `updatedAt`/`lastSyncedAt`. No-op when
+ * the row does not exist.
+ */
+export function setCollectionRemoteStale(id: string, stale: boolean): void {
+  db.update(collections)
+    .set({ remoteStale: stale })
+    .where(eq(collections.id, id))
+    .run();
 }
 /**
  * Replace all membership rows for a collection with the given ordered kids.

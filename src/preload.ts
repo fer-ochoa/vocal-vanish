@@ -58,6 +58,8 @@ export interface CollectionRow {
   updatedAt: string;
   lastSyncedAt: string | null;
   remoteItemCount: number | null;
+  /** True when the remote playlist is no longer reachable (deleted / made private). */
+  remoteStale: boolean;
 }
 /** A collection row with its song count (from `kara:collections-list`). */
 export interface CollectionRowWithCount extends CollectionRow {
@@ -65,6 +67,26 @@ export interface CollectionRowWithCount extends CollectionRow {
 }
 /** Allowed `order` values for the kara.moe playlist list (mirrors PlaylistOrder in src/kara-api.ts). */
 export type PlaylistOrder = 'az' | 'recent' | 'karacount' | 'duration' | 'username';
+/** A public playlist as returned by the kara.moe API (mirrors RemotePlaylist in src/kara-api.ts). */
+export interface RemotePlaylist {
+  plaid: string;
+  name: string;
+  description?: string | null;
+  slug?: string | null;
+  karacount?: number | null;
+  duration?: number | null;
+  created_at?: string | null;
+  modified_at?: string | null;
+  username?: string | null;
+  nickname?: string | null;
+  flag_visible?: boolean | null;
+  flag_visible_online?: boolean | null;
+}
+/** Result of re-syncing a `remote-subscribed` collection (feat 08). */
+export interface SubscribedSyncResult {
+  items: RemoteItemRow[];
+  stale: boolean;
+}
 /** One row of a remote playlist snapshot (mirrors the main-process shape). */
 export interface RemoteItemRow {
   kid: string;
@@ -320,6 +342,43 @@ const api = {
     const listener = (_e: unknown, p: CollectionDownloadProgress): void => callback(p);
     ipcRenderer.on('kara:collection-download-progress', listener);
     return () => ipcRenderer.removeListener('kara:collection-download-progress', listener);
+  },
+  // --- Remote-subscribed playlists (feat 08) -----------------------------
+  /**
+   * Browse another user's public kara.moe playlists (server-side
+   * `byUsername` filter). Pure discovery — no DB writes, no auth required
+   * (works logged out). Errors are surfaced to the caller, not swallowed.
+   */
+  collectionBrowseUser(opts: {
+    username: string;
+    filter?: string;
+    order?: PlaylistOrder;
+    includeContributions?: boolean;
+    refresh?: boolean;
+  }): Promise<RemotePlaylist[]> {
+    return ipcRenderer.invoke('kara:collection-browse-user', opts);
+  },
+  /**
+   * Subscribe to a remote playlist: upserts the `remote-subscribed`
+   * collection row, fetches its contents, persists the ordered snapshot +
+   * membership, and returns the collection row. Idempotent — subscribing
+   * twice does not duplicate the row or the snapshot.
+   */
+  collectionSubscribe(params: {
+    plaid: string;
+    name?: string;
+    ownerUsername?: string | null;
+  }): Promise<CollectionRow> {
+    return ipcRenderer.invoke('kara:collection-subscribe', params);
+  },
+  /**
+   * Re-sync a `remote-subscribed` collection from kara.moe. On success
+   * refreshes the snapshot + membership and clears the stale flag; on
+   * failure (playlist deleted / made private) marks it stale and returns the
+   * persisted snapshot. Resolves with `{ items, stale }`.
+   */
+  collectionSyncSubscribed(collectionId: string): Promise<SubscribedSyncResult> {
+    return ipcRenderer.invoke('kara:collection-sync-subscribed', collectionId);
   },
 };
 

@@ -37,6 +37,9 @@ export const collections = sqliteTable("collections", {
   updatedAt: text("updated_at").notNull(),
   lastSyncedAt: text("last_synced_at"),
   remoteItemCount: integer("remote_item_count"), // nullable; kara.moe `karacount` at last sync
+  remoteStale: integer("remote_stale", { mode: "boolean" })
+    .notNull()
+    .default(false), // true when the remote playlist is no longer public / could not be fetched on last sync
 });
 /**
  * Many-to-many join table: which songs belong to which collections, and in

@@ -47,7 +47,8 @@ function openDb() {
       owner_username TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      last_synced_at TEXT
+      last_synced_at TEXT,
+      remote_stale INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS collection_songs (
@@ -86,6 +87,9 @@ function openDb() {
   const cols = sqlite.prepare("PRAGMA table_info(collections)").all() as { name: string }[];
   if (!cols.some((c) => c.name === "remote_item_count")) {
     sqlite.exec("ALTER TABLE collections ADD COLUMN remote_item_count INTEGER");
+  }
+  if (!cols.some((c) => c.name === "remote_stale")) {
+    sqlite.exec("ALTER TABLE collections ADD COLUMN remote_stale INTEGER NOT NULL DEFAULT 0");
   }
   return drizzle(sqlite, { schema });
 }
