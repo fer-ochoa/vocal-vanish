@@ -217,6 +217,24 @@ export interface CollectionRow {
   remoteItemCount: number | null;
 }
 
+/**
+ * The subset of `remoteKids` that are NOT in the local `songs` table,
+ * preserving input order and de-duplicated (first occurrence wins).
+ * Thin wrapper over `alreadyDownloadedKids`. Empty input -> empty array;
+ * never throws.
+ */
+export function missingKidsForBulkDownload(remoteKids: string[]): string[] {
+  if (!remoteKids.length) return [];
+  const have = alreadyDownloadedKids(remoteKids);
+  const seen = new Set<string>();
+  const missing: string[] = [];
+  for (const kid of remoteKids) {
+    if (seen.has(kid)) continue;
+    seen.add(kid);
+    if (!have.has(kid)) missing.push(kid);
+  }
+  return missing;
+}
 /** All collections ordered by name. */
 export function listCollections(): CollectionRow[] {
   return db.select().from(collections).orderBy(collections.name).all();
@@ -506,6 +524,28 @@ export function addSongToCollection(collectionId: string, kid: string): void {
   db.insert(collectionSongs)
     .values({ collectionId, kid, position: maxPos + 1 })
     .onConflictDoNothing()
+    .run();
+}
+/**
+ * Insert a `collection_songs` row for (collectionId, kid) at the given
+ * `position`. Idempotent: when a row for that (collectionId, kid) already
+ * exists (the composite primary key), its `position` is updated instead of
+ * inserting a duplicate. No-op if the collection row does not exist.
+ * Does not touch the `songs` table.
+ */
+export function addSongToCollectionAt(
+  collectionId: string,
+  kid: string,
+  position: number,
+): void {
+  const col = db.select().from(collections).where(eq(collections.id, collectionId)).get();
+  if (!col) return;
+  db.insert(collectionSongs)
+    .values({ collectionId, kid, position })
+    .onConflictDoUpdate({
+      target: [collectionSongs.collectionId, collectionSongs.kid],
+      set: { position },
+    })
     .run();
 }
 

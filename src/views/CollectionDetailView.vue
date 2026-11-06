@@ -7,6 +7,14 @@
         <span v-if="isRemote" class="muted small">{{ downloadedCount }} of {{ rows.length }} downloaded</span>
         <span v-else class="muted small">{{ songs.length }} song{{ songs.length === 1 ? '' : 's' }}</span>
       </p>
+      <button
+        v-if="isRemote"
+        class="btn btn-primary"
+        :disabled="bulkBusy || missingCount === 0"
+        @click="downloadAllMissing"
+      >
+        Download all missing ({{ missingCount }})
+      </button>
     </header>
     <!-- Local collections -->
     <ul v-if="!isRemote && songs.length" class="list">
@@ -87,6 +95,45 @@
     <!-- Empty states -->
     <p v-if="loaded && isRemote && !rows.length" class="muted">This playlist is empty on kara.moe.</p>
     <p v-if="loaded && !isRemote && !songs.length" class="muted">No songs in this collection yet.</p>
+    <!-- Bulk download progress overlay -->
+    <transition name="fade">
+      <div v-if="bulkBusy || bulkSummary" class="overlay">
+        <div class="dialog">
+          <h2 v-if="bulkBusy">Downloading {{ bulkDone }} / {{ bulkTotal }}</h2>
+          <h2 v-else>Download complete</h2>
+          <p v-if="bulkBusy" class="muted small">
+            {{ bulkDone }} of {{ bulkTotal }} done
+          </p>
+          <div v-if="bulkBusy" class="bulk-bars">
+            <div v-for="item in bulkInFlightList" :key="item.kid" class="bulk-bar">
+              <div class="row-title small">{{ bulkTitle(item.kid) }}</div>
+              <div class="bar"><div class="bar-fill" :style="{ width: bulkPct(item) + '%' }" /></div>
+              <p class="small muted">{{ bulkLabel(item) }}</p>
+            </div>
+            <p v-if="!bulkInFlightList.length" class="muted small">Waiting for next song…</p>
+          </div>
+          <template v-else>
+            <p class="muted">
+              {{ bulkSummary.downloaded }} downloaded, {{ bulkSummary.skipped }} skipped, {{ bulkSummary.failed.length }} failed
+            </p>
+            <ul v-if="bulkSummary.failed.length" class="list bulk-failed">
+              <li v-for="f in bulkSummary.failed" :key="f.kid" class="row">
+                <div class="row-main">
+                  <div class="row-title">{{ bulkTitle(f.kid) }}</div>
+                  <div class="row-sub">
+                    <span class="muted small">{{ f.kid }}</span>
+                  </div>
+                </div>
+                <div class="row-actions">
+                  <span class="muted small">{{ f.error }}</span>
+                </div>
+              </li>
+            </ul>
+            <button class="btn btn-primary" @click="closeBulkSummary">Close</button>
+          </template>
+        </div>
+      </div>
+    </transition>
     <!-- Error toast -->
     <transition name="fade">
       <div v-if="error" class="toast">{{ error }}</div>
@@ -107,6 +154,11 @@ const busy = ref(false);
 const error = ref('');
 const isRemote = computed(() => collection.value?.source === 'remote-own');
 const downloadedCount = computed(() => rows.value.filter((r: any) => r.downloaded).length);
+// Songs in the collection not yet in the local library. Local collections can
+// only contain already-downloaded songs, so only remote-own can have a gap.
+const missingCount = computed(() =>
+  isRemote.value ? rows.value.filter((r: any) => !r.downloaded).length : 0
+);
 async function load(): Promise<void> {
   try {
     // Load collection metadata
@@ -171,6 +223,67 @@ async function moveDown(idx: number): Promise<void> {
   } finally {
     busy.value = false;
   }
+}
+// --- Bulk download (feat 07) ----------------------------------------------
+const bulkBusy = ref(false);
+const bulkTotal = ref(0);
+const bulkDone = ref(0);
+const bulkInFlight = ref<Record<string, { kid: string; received: number; total: number | null }>>({});
+const bulkSummary = ref<{ downloaded: number; skipped: number; failed: { kid: string; error: string }[] } | null>(null);
+let offBulkProgress: (() => void) | null = null;
+let offBulkBytes: (() => void) | null = null;
+const bulkInFlightList = computed(() => Object.values(bulkInFlight.value));
+function bulkTitle(kid: string): string {
+  return rows.value.find((r: any) => r.kid === kid)?.title || kid;
+}
+function bulkPct(item: { received: number; total: number | null }): number {
+  if (!item.total) return 0;
+  return Math.min(100, Math.round((item.received / item.total) * 100));
+}
+function bulkLabel(item: { received: number; total: number | null }): string {
+  if (!item.total) return '…';
+  return `${Math.round((item.received / item.total) * 100)}%`;
+}
+async function downloadAllMissing(): Promise<void> {
+  if (bulkBusy.value || missingCount.value === 0) return;
+  bulkBusy.value = true;
+  bulkSummary.value = null;
+  bulkTotal.value = 0;
+  bulkDone.value = 0;
+  bulkInFlight.value = {};
+  error.value = '';
+  offBulkProgress = window.kara.onCollectionDownloadProgress((p) => {
+    if (p.collectionId !== collectionId) return;
+    bulkTotal.value = p.total;
+    bulkDone.value = p.completed;
+    if (p.status === 'start') {
+      bulkInFlight.value[p.kid] = { kid: p.kid, received: 0, total: null };
+    } else if (p.status === 'done' || p.status === 'failed') {
+      delete bulkInFlight.value[p.kid];
+    }
+  });
+  offBulkBytes = window.kara.onDownloadProgress((p) => {
+    const item = bulkInFlight.value[p.kid];
+    if (!item) return;
+    item.received = p.received;
+    if (p.total) item.total = p.total;
+  });
+  try {
+    const summary = await window.kara.collectionDownload(collectionId);
+    bulkSummary.value = summary;
+    await load();
+  } catch (e) {
+    error.value = (e as Error).message || 'Bulk download failed';
+  } finally {
+    offBulkProgress?.();
+    offBulkBytes?.();
+    offBulkProgress = null;
+    offBulkBytes = null;
+    bulkBusy.value = false;
+  }
+}
+function closeBulkSummary(): void {
+  bulkSummary.value = null;
 }
 // --- Helpers ---------------------------------------------------------------
 function sourceBadgeClass(source: string): string {

@@ -411,6 +411,30 @@ body {
   background: var(--accent);
   transition: width 0.2s ease;
 }
+/* Bulk collection download: one bar per in-flight song */
+.bulk-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 14px 0 6px;
+  max-height: 40vh;
+  overflow-y: auto;
+  text-align: left;
+}
+
+.bulk-bar .bar {
+  margin: 6px 0 4px;
+}
+
+.bulk-failed {
+  max-height: 30vh;
+  overflow-y: auto;
+  text-align: left;
+}
+
+.dialog:has(.bulk-bars) {
+  width: 460px;
+}
 
 /* --- Toast ---------------------------------------------------------------- */
 .toast {

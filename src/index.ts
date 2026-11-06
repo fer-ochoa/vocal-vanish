@@ -31,6 +31,8 @@ import {
   pruneRemoteOwnPlaylists,
   getCollection,
   isDownloaded,
+  missingKidsForBulkDownload,
+  addSongToCollectionAt,
 } from "./db/queries";
 import {
   getMyPlaylists,
@@ -140,6 +142,12 @@ export interface CatalogEntry {
   offVocal?: boolean;
 }
 
+/** Summary returned by a bulk collection download. */
+export interface BulkDownloadSummary {
+  downloaded: number;
+  skipped: number;
+  failed: { kid: string; error: string }[];
+}
 /** A row shown in the search results list. */
 export interface SearchRow {
   kid: string;
@@ -367,6 +375,61 @@ function downloadFile(
 }
 
 // ---------------------------------------------------------------------------
+// Single-song download (shared by `kara:download` and `kara:collection-download`)
+// ---------------------------------------------------------------------------
+/**
+ * Download a single song's hardsub video into the local catalog.
+ *
+ * Fetches full song metadata, streams the hardsub file to a tmp path,
+ * atomically moves it into `media/<kid>/`, upserts the catalog entry, and
+ * returns it. `onProgress` is called with `(received, total)` as bytes arrive.
+ *
+ * Throws when the song has no downloadable hardsub media, on HTTP/network
+ * failure, or on filesystem error.
+ */
+async function downloadSong(
+  kid: string,
+  onProgress: (received: number, total: number | null) => void,
+): Promise<CatalogEntry> {
+  ensureMediaDir(kid);
+  ensureTmpDir();
+  // Fetch full song metadata to get title/series/duration + hardsub filename.
+  const song = await httpGetJson<Song>(
+    `${API_BASE}/karas/${encodeURIComponent(kid)}`,
+  );
+  if (!song || !song.hardsubbed_mediafile) {
+    throw new Error("This song has no downloadable hardsub media.");
+  }
+  const row = songToRow(song);
+  const fileName = song.hardsubbed_mediafile; // e.g. "<kid>.<size>.<hash>.mp4"
+  const finalPath = path.join(mediaDir(kid), fileName);
+  const tmpPath = tmpPartPath(kid);
+  // Clean up any stale partial file from a previous interrupted download.
+  try {
+    if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+  } catch {
+    /* ignore */
+  }
+  const mediaUrl = `${MEDIA_BASE}/hardsubs/${encodeURIComponent(fileName)}`;
+  await downloadFile(mediaUrl, tmpPath, onProgress);
+  // Atomically move the completed file into place.
+  fs.renameSync(tmpPath, finalPath);
+  const entry: CatalogEntry = {
+    kid: song.kid,
+    title: row.title,
+    series: row.series,
+    singer: row.singer,
+    duration: row.duration,
+    file: fileName,
+    size: row.size,
+    downloadedAt: new Date().toISOString(),
+    langs: languageCodes(song),
+    offVocal: isOffVocal(song),
+  };
+  upsertSong(entry);
+  return entry;
+}
+// ---------------------------------------------------------------------------
 // IPC handlers
 // ---------------------------------------------------------------------------
 
@@ -454,57 +517,12 @@ function registerIpc(): void {
   });
 
   // Download a song's hardsub video into the local catalog.
-  ipcMain.handle(
-    "kara:download",
-    async (e, kid: string): Promise<CatalogEntry> => {
-      const sender = e.sender;
-      ensureMediaDir(kid);
-      ensureTmpDir();
-
-      // Fetch full song metadata to get title/series/duration + hardsub filename.
-      const song = await httpGetJson<Song>(
-        `${API_BASE}/karas/${encodeURIComponent(kid)}`,
-      );
-      if (!song || !song.hardsubbed_mediafile) {
-        throw new Error("This song has no downloadable hardsub media.");
-      }
-
-      const row = songToRow(song);
-      const fileName = song.hardsubbed_mediafile; // e.g. "<kid>.<size>.<hash>.mp4"
-      const finalPath = path.join(mediaDir(kid), fileName);
-      const tmpPath = tmpPartPath(kid);
-
-      // Clean up any stale partial file from a previous interrupted download.
-      try {
-        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-      } catch {
-        /* ignore */
-      }
-
-      const mediaUrl = `${MEDIA_BASE}/hardsubs/${encodeURIComponent(fileName)}`;
-      await downloadFile(mediaUrl, tmpPath, (received, total) => {
-        sender.send("kara:download-progress", { kid, received, total });
-      });
-
-      // Atomically move the completed file into place.
-      fs.renameSync(tmpPath, finalPath);
-
-      const entry: CatalogEntry = {
-        kid: song.kid,
-        title: row.title,
-        series: row.series,
-        singer: row.singer,
-        duration: row.duration,
-        file: fileName,
-        size: row.size,
-        downloadedAt: new Date().toISOString(),
-        langs: languageCodes(song),
-        offVocal: isOffVocal(song),
-      };
-      upsertSong(entry);
-      return entry;
-    },
-  );
+  ipcMain.handle("kara:download", async (e, kid: string): Promise<CatalogEntry> => {
+    const sender = e.sender;
+    return downloadSong(kid, (received, total) => {
+      sender.send("kara:download-progress", { kid, received, total });
+    });
+  });
 
   // Stream a catalog video to the renderer. The renderer's <video>/video.js
   // cannot load file:// URLs directly in dev mode (the page is served from the
@@ -995,6 +1013,133 @@ function registerIpc(): void {
         items = getRemotePlaylistItemsWithDownloaded(collectionId);
       }
       return items;
+    },
+  );
+  // Bulk-download every song in a collection that is not yet in the local
+  // library. Reuses `downloadSong` (the same machinery as `kara:download`)
+  // under a small concurrency cap, and reports per-song progress over the
+  // existing `kara:download-progress` channel plus a bulk-level
+  // `kara:collection-download-progress` channel.
+  ipcMain.handle(
+    "kara:collection-download",
+    async (e, collectionId: string): Promise<BulkDownloadSummary> => {
+      const col = getCollection(collectionId);
+      if (!col) throw new Error("Collection not found.");
+
+      // Build the ordered target kid list.
+      let targetKids: string[];
+      if (col.source === "remote-own") {
+        // Re-sync first so a stale snapshot doesn't skip newly-added songs.
+        // If the fetch throws, fall back to the already-persisted snapshot
+        // rather than failing the whole operation.
+        try {
+          const items = await getPlaylistContents(collectionId);
+          replaceRemotePlaylistItems(
+            collectionId,
+            items.map((i) => ({
+              kid: i.kid,
+              position: i.pos,
+              title: i.title,
+              series: i.series,
+              singer: i.singer,
+              duration: i.duration,
+              payload: i.payload,
+            })),
+          );
+          targetKids = [...items]
+            .sort((a, b) => a.pos - b.pos)
+            .map((i) => i.kid);
+        } catch {
+          targetKids = getRemotePlaylistItems(collectionId).map((i) => i.kid);
+        }
+        // Dedupe while preserving order.
+        const seen = new Set<string>();
+        targetKids = targetKids.filter((k) => {
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
+      } else {
+        // local / remote-subscribed: use the persisted membership rows.
+        targetKids = getCollectionSongs(collectionId).map((s) => s.kid);
+      }
+
+      const missing = missingKidsForBulkDownload(targetKids);
+      const skipped = targetKids.length - missing.length;
+      const failed: { kid: string; error: string }[] = [];
+      let completed = 0;
+
+      // Deliberately lower than the CONCURRENCY = 5 used by
+      // kara:catalog-backfill: these are byte-heavy downloads and 2–3 is
+      // kinder to the user's bandwidth and to kara.moe. Tunable.
+      const BULK_DOWNLOAD_CONCURRENCY = 2;
+
+      if (missing.length > 0) {
+        let next = 0;
+        const workers = Array.from(
+          { length: Math.min(BULK_DOWNLOAD_CONCURRENCY, missing.length) },
+          async () => {
+            let i = next++;
+            while (i < missing.length) {
+              const kid = missing[i];
+              const position = targetKids.indexOf(kid);
+              e.sender.send("kara:collection-download-progress", {
+                collectionId,
+                kid,
+                status: "start",
+                completed,
+                total: targetKids.length,
+              });
+              try {
+                await downloadSong(kid, (received, total) =>
+                  e.sender.send("kara:download-progress", {
+                    kid,
+                    received,
+                    total,
+                  }),
+                );
+                completed++;
+                addSongToCollectionAt(collectionId, kid, position);
+                e.sender.send("kara:collection-download-progress", {
+                  collectionId,
+                  kid,
+                  status: "done",
+                  completed,
+                  total: targetKids.length,
+                });
+              } catch (err) {
+                completed++;
+                failed.push({
+                  kid,
+                  error: (err as Error).message || String(err),
+                });
+                e.sender.send("kara:collection-download-progress", {
+                  collectionId,
+                  kid,
+                  status: "failed",
+                  completed,
+                  total: targetKids.length,
+                  error: (err as Error).message || String(err),
+                });
+              }
+              i = next++;
+            }
+          },
+        );
+        await Promise.all(workers);
+      }
+
+      // Normalise membership: the full ordered target list filtered to songs
+      // that actually exist locally (the FK on collection_songs.kid requires
+      // it), so songs already owned before this bulk action stay in the
+      // collection.
+      replaceCollectionMembership(
+        collectionId,
+        targetKids.filter((k) => isDownloaded(k)),
+        { touchSyncedAt: col.source !== "local" },
+      );
+
+      return { downloaded: missing.length - failed.length, skipped, failed };
     },
   );
 }

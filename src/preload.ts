@@ -77,6 +77,21 @@ export interface RemoteItemRow {
   /** True when the song is already in the local catalog. */
   downloaded: boolean;
 }
+/** Summary returned by a bulk collection download (feat 07). */
+export interface BulkDownloadSummary {
+  downloaded: number;
+  skipped: number;
+  failed: { kid: string; error: string }[];
+}
+/** Per-song status event emitted during a bulk collection download (feat 07). */
+export interface CollectionDownloadProgress {
+  collectionId: string;
+  kid: string;
+  status: 'start' | 'done' | 'failed';
+  completed: number;
+  total: number;
+  error?: string;
+}
 
 /**
  * The only surface the renderer can use. Everything is a narrow, promise-based
@@ -284,6 +299,27 @@ const api = {
    */
   collectionRemoteItems(collectionId: string): Promise<RemoteItemRow[]> {
     return ipcRenderer.invoke('kara:collection-remote-items', collectionId);
+  },
+  // --- Bulk collection download (feat 07) --------------------------------
+  /**
+   * Download every song in a collection that is not already in the local
+   * library. Re-syncs a `remote-own` playlist first, downloads only the
+   * missing kids (concurrency-capped), and reports per-song byte progress on
+   * the existing `onDownloadProgress` listener plus per-song status on
+   * `onCollectionDownloadProgress`. Resolves with a summary; individual song
+   * failures are reported in `failed` and never abort the batch.
+   */
+  collectionDownload(collectionId: string): Promise<BulkDownloadSummary> {
+    return ipcRenderer.invoke('kara:collection-download', collectionId);
+  },
+  /**
+   * Subscribe to per-song bulk-download status events. Returns an unsubscribe
+   * function, same pattern as `onDownloadProgress`.
+   */
+  onCollectionDownloadProgress(callback: (p: CollectionDownloadProgress) => void): () => void {
+    const listener = (_e: unknown, p: CollectionDownloadProgress): void => callback(p);
+    ipcRenderer.on('kara:collection-download-progress', listener);
+    return () => ipcRenderer.removeListener('kara:collection-download-progress', listener);
   },
 };
 
