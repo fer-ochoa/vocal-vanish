@@ -1,10 +1,10 @@
-import { eq, inArray, notInArray, sql, and } from "drizzle-orm";
+import { eq, inArray, sql, and } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { db } from "./index";
-import { songs, collections, collectionSongs, remotePlaylistItems, account } from "./schema";
+import { songs, collections, collectionSongs, account } from "./schema";
 
 /**
- * A catalog entry persisted locally for a downloaded song.
+ * A catalog entry persisted locally for a song the app knows about.
  *
  * This is a local re-declaration of the `CatalogEntry` interface defined in
  * `src/index.ts` (and mirrored in `src/preload.ts`). It is re-declared here
@@ -14,6 +14,9 @@ import { songs, collections, collectionSongs, remotePlaylistItems, account } fro
  * the DB column names (`mediaFile`/`mediaSize`/`lyriclessFile`) are mapped
  * to/from the existing field names (`file`/`size`/`lyriclessFile`) inside
  * this file so every call site above and below it is untouched.
+ *
+ * A row may exist for a song that is NOT downloaded: `file === null` means
+ * "not downloaded".
  */
 export interface CatalogEntry {
   kid: string;
@@ -21,14 +24,16 @@ export interface CatalogEntry {
   series: string;
   singer: string;
   duration: number | null; // seconds
-  file: string; // filename of the hardsub video inside the catalog dir
+  file: string | null; // filename of the hardsub video inside the catalog dir; null = not downloaded
   size: number | null; // bytes
-  downloadedAt: string; // ISO date
+  downloadedAt: string | null; // ISO date; null = not downloaded
   lyriclessFile?: string | null; // filename of the lyricless variant, if generated
   /** Language codes of the song, e.g. ["JPN"]. */
   langs?: string[];
   /** True when the song's version is "Off Vocal" (already instrumental). */
   offVocal?: boolean;
+  /** Derived: true when the song has a media file (is downloaded). */
+  downloaded: boolean;
 }
 
 /** Map a raw `songs` row to the `CatalogEntry` shape the IPC layer expects. */
@@ -45,49 +50,62 @@ function rowToEntry(row: typeof songs.$inferSelect): CatalogEntry {
     lyriclessFile: row.lyriclessFile,
     langs: row.langs ?? undefined,
     offVocal: row.offVocal,
+    downloaded: row.mediaFile !== null,
   };
 }
 
-/** All downloaded songs, sorted by `downloadedAt` desc (same ordering
- *  `kara:catalog` returns today). */
+/** All songs (downloaded and not), sorted by `downloadedAt` desc with nulls
+ *  last, then title. */
 export function getAllSongs(): CatalogEntry[] {
   const rows = db
     .select()
     .from(songs)
-    .orderBy(songs.downloadedAt)
-    .all()
-    .reverse();
+    .orderBy(sql`CASE WHEN ${songs.downloadedAt} IS NULL THEN 1 ELSE 0 END`, songs.downloadedAt, songs.title)
+    .all();
   return rows.map(rowToEntry);
 }
 
-/** A single song by kid, or undefined if not downloaded. */
+/** Only songs that have been downloaded (`media_file IS NOT NULL`). */
+export function getDownloadedSongs(): CatalogEntry[] {
+  const rows = db
+    .select()
+    .from(songs)
+    .where(sql`${songs.mediaFile} IS NOT NULL`)
+    .orderBy(sql`CASE WHEN ${songs.downloadedAt} IS NULL THEN 1 ELSE 0 END`, songs.downloadedAt, songs.title)
+    .all();
+  return rows.map(rowToEntry);
+}
+
+/** A single song by kid, or undefined if not in the catalog. */
 export function getSong(kid: string): CatalogEntry | undefined {
   const row = db.select().from(songs).where(eq(songs.kid, kid)).get();
   return row ? rowToEntry(row) : undefined;
 }
 
-/** True when the given kid is already in the local catalog. */
+/** True when the given kid has a media file (is downloaded). */
 export function isDownloaded(kid: string): boolean {
-  return db
-    .select({ kid: songs.kid })
-    .from(songs)
-    .where(eq(songs.kid, kid))
-    .get()
-    !== undefined;
+  return (
+    db
+      .select({ kid: songs.kid })
+      .from(songs)
+      .where(and(eq(songs.kid, kid), sql`${songs.mediaFile} IS NOT NULL`))
+      .get() !== undefined
+  );
 }
 
-/** The subset of `kids` that are already downloaded. */
+/** The subset of `kids` that are already downloaded (have a media file). */
 export function alreadyDownloadedKids(kids: string[]): Set<string> {
   if (!kids.length) return new Set();
   const rows = db
     .select({ kid: songs.kid })
     .from(songs)
-    .where(inArray(songs.kid, kids))
+    .where(and(inArray(songs.kid, kids), sql`${songs.mediaFile} IS NOT NULL`))
     .all();
   return new Set(rows.map((r) => r.kid));
 }
 
-/** Insert or update a song row (keyed by kid). */
+/** Insert or update a song row (keyed by kid). Full upsert used by the
+ *  download path; sets media_file/media_size/downloaded_at. */
 export function upsertSong(entry: CatalogEntry): void {
   db.insert(songs)
     .values({
@@ -119,6 +137,66 @@ export function upsertSong(entry: CatalogEntry): void {
       },
     })
     .run();
+}
+
+/**
+ * Insert-or-update metadata-only fields (title/series/singer/duration/langs/
+ * off_vocal) for a song. Must NEVER touch media_file/media_size/
+ * downloaded_at/lyricless_file on an existing row.
+ */
+export function upsertSongMetadata(item: ImportedItem): void {
+  db.insert(songs)
+    .values({
+      kid: item.kid,
+      title: item.title,
+      series: item.series,
+      singer: item.singer,
+      duration: item.duration,
+      mediaFile: null,
+      mediaSize: null,
+      lyriclessFile: null,
+      langs: item.langs,
+      offVocal: item.offVocal,
+      downloadedAt: null,
+    })
+    .onConflictDoUpdate({
+      target: songs.kid,
+      set: {
+        title: item.title,
+        series: item.series,
+        singer: item.singer,
+        duration: item.duration,
+        langs: item.langs,
+        offVocal: item.offVocal,
+      },
+    })
+    .run();
+}
+
+/**
+ * Clear the download state for a song: sets media_file, media_size,
+ * lyricless_file, downloaded_at to NULL. Keeps the row and its memberships.
+ */
+export function clearSongDownload(kid: string): void {
+  db.update(songs)
+    .set({
+      mediaFile: null,
+      mediaSize: null,
+      lyriclessFile: null,
+      downloadedAt: null,
+    })
+    .where(eq(songs.kid, kid))
+    .run();
+}
+
+/** Count of `collection_songs` rows for a given kid. */
+export function songCollectionCount(kid: string): number {
+  const row = db
+    .select({ n: sql<number>`count(*)` })
+    .from(collectionSongs)
+    .where(eq(collectionSongs.kid, kid))
+    .get();
+  return row?.n ?? 0;
 }
 
 /** Record a generated lyricless file for a song. */
@@ -209,13 +287,33 @@ export function clearAccount(): void {
 export interface CollectionRow {
   id: string;
   name: string;
-  source: "local" | "remote-own" | "remote-subscribed";
+  source: "local" | "imported";
+  origin: "own" | "public" | null;
+  remotePlaid: string | null;
   ownerUsername: string | null;
   createdAt: string;
   updatedAt: string;
   lastSyncedAt: string | null;
   remoteItemCount: number | null;
   remoteStale: boolean;
+}
+
+/** A collection row with song counts. */
+export interface CollectionRowWithCount extends CollectionRow {
+  songCount: number;        // membership rows
+  downloadedCount: number;  // membership rows whose song has media_file
+}
+
+/** A single item in an imported collection (metadata only). */
+export interface ImportedItem {
+  kid: string;
+  position: number;
+  title: string;
+  series: string;
+  singer: string;
+  duration: number | null;
+  langs: string[];
+  offVocal: boolean;
 }
 
 /**
@@ -241,13 +339,15 @@ export function listCollections(): CollectionRow[] {
   return db.select().from(collections).orderBy(collections.name).all();
 }
 
-/** All collections with their song count, ordered by name. */
-export function listCollectionsWithCounts(): (CollectionRow & { songCount: number })[] {
+/** All collections with their song count and downloaded count, ordered by name. */
+export function listCollectionsWithCounts(): CollectionRowWithCount[] {
   return db
     .select({
       id: collections.id,
       name: collections.name,
       source: collections.source,
+      origin: collections.origin,
+      remotePlaid: collections.remotePlaid,
       ownerUsername: collections.ownerUsername,
       createdAt: collections.createdAt,
       updatedAt: collections.updatedAt,
@@ -255,9 +355,11 @@ export function listCollectionsWithCounts(): (CollectionRow & { songCount: numbe
       remoteItemCount: collections.remoteItemCount,
       remoteStale: collections.remoteStale,
       songCount: sql<number>`count(${collectionSongs.kid})`,
+      downloadedCount: sql<number>`count(${songs.mediaFile})`,
     })
     .from(collections)
     .leftJoin(collectionSongs, eq(collectionSongs.collectionId, collections.id))
+    .leftJoin(songs, eq(collectionSongs.kid, songs.kid))
     .groupBy(collections.id)
     .orderBy(collections.name)
     .all();
@@ -272,6 +374,8 @@ export function createLocalCollection(name: string): CollectionRow {
       id,
       name,
       source: "local",
+      origin: null,
+      remotePlaid: null,
       ownerUsername: null,
       createdAt: now,
       updatedAt: now,
@@ -284,6 +388,8 @@ export function createLocalCollection(name: string): CollectionRow {
     id,
     name,
     source: "local",
+    origin: null,
+    remotePlaid: null,
     ownerUsername: null,
     createdAt: now,
     updatedAt: now,
@@ -305,98 +411,97 @@ export function renameCollection(id: string, name: string): void {
 export function deleteCollection(id: string): void {
   db.delete(collections).where(eq(collections.id, id)).run();
 }
-/** A single row in the `remote_playlist_items` snapshot table. */
-export interface RemotePlaylistItem {
-  kid: string;
-  position: number;
-  title: string;
-  series: string;
-  singer: string;
-  duration: number | null;
-  payload: string | null;
+
+/** Find a collection by its remote plaid (the source kara.moe playlist id). */
+export function findCollectionByPlaid(plaid: string): CollectionRow | undefined {
+  return db
+    .select()
+    .from(collections)
+    .where(eq(collections.remotePlaid, plaid))
+    .get();
 }
+
 /**
- * Upsert a `remote-own` collection keyed by the remote `plaid`. On insert
- * `createdAt` is set; on update only `name`, `ownerUsername`,
- * `remoteItemCount`, `updatedAt` and `lastSyncedAt` change — `createdAt`
- * and `source` are never touched. Returns the resulting row.
+ * Import a kara.moe playlist as a local collection. One transaction:
+ * insert the collection (fresh UUID id, source 'imported', remotePlaid =
+ * plaid, lastSyncedAt = now, remoteItemCount = items.length), upsert
+ * metadata for every item, then replace membership with ALL kids in
+ * position order.
  */
-export function upsertRemoteOwnPlaylist(
-  plaid: string,
-  name: string,
-  ownerUsername: string | null,
-  remoteItemCount: number | null,
-): CollectionRow {
+export function importCollection(params: {
+  plaid: string;
+  name: string;
+  ownerUsername: string | null;
+  origin: "own" | "public";
+  items: ImportedItem[];
+}): CollectionRow {
+  const id = randomUUID();
   const now = new Date().toISOString();
-  db.insert(collections)
-    .values({
-      id: plaid,
-      name,
-      source: "remote-own",
-      ownerUsername,
-      createdAt: now,
-      updatedAt: now,
-      lastSyncedAt: now,
-      remoteItemCount,
-      remoteStale: false,
-    })
-    .onConflictDoUpdate({
-      target: collections.id,
-      set: {
-        name,
-        ownerUsername,
-        remoteItemCount,
+  db.transaction((tx) => {
+    tx.insert(collections)
+      .values({
+        id,
+        name: params.name,
+        source: "imported",
+        origin: params.origin,
+        remotePlaid: params.plaid,
+        ownerUsername: params.ownerUsername,
+        createdAt: now,
         updatedAt: now,
         lastSyncedAt: now,
-      },
-    })
-    .run();
-  const row = db.select().from(collections).where(eq(collections.id, plaid)).get();
-  if (!row) throw new Error(`upsertRemoteOwnPlaylist: row ${plaid} not found after upsert`);
-  return row;
-}
-/**
- * Upsert a `remote-subscribed` collection keyed by the remote `plaid`.
- * On insert `createdAt` is set; on update only `name`, `ownerUsername`,
- * `remoteItemCount`, `updatedAt`, `lastSyncedAt` and `remoteStale`
- * change — `createdAt` and `source` are never touched, so re-subscribing
- * an existing `remote-own` row does not silently convert it. Returns the
- * resulting row.
- */
-export function upsertSubscribedCollection(
-  plaid: string,
-  name: string,
-  ownerUsername: string | null,
-  remoteItemCount: number | null,
-): CollectionRow {
-  const now = new Date().toISOString();
-  db.insert(collections)
-    .values({
-      id: plaid,
-      name,
-      source: "remote-subscribed",
-      ownerUsername,
-      createdAt: now,
-      updatedAt: now,
-      lastSyncedAt: now,
-      remoteItemCount,
-      remoteStale: false,
-    })
-    .onConflictDoUpdate({
-      target: collections.id,
-      set: {
-        name,
-        ownerUsername,
-        remoteItemCount,
-        updatedAt: now,
-        lastSyncedAt: now,
+        remoteItemCount: params.items.length,
         remoteStale: false,
-      },
-    })
-    .run();
-  const row = db.select().from(collections).where(eq(collections.id, plaid)).get();
-  if (!row) throw new Error(`upsertSubscribedCollection: row ${plaid} not found after upsert`);
+      })
+      .run();
+    for (const item of params.items) {
+      upsertSongMetadata(item);
+    }
+    // Replace membership with ALL kids in position order.
+    const sorted = [...params.items].sort((a, b) => a.position - b.position);
+    sorted.forEach((item, idx) => {
+      tx.insert(collectionSongs)
+        .values({ collectionId: id, kid: item.kid, position: idx })
+        .run();
+    });
+  });
+  const row = db.select().from(collections).where(eq(collections.id, id)).get();
+  if (!row) throw new Error(`importCollection: row ${id} not found after insert`);
   return row;
+}
+
+/**
+ * Sync an imported collection with fresh items from the remote playlist.
+ * Same as importCollection minus the collection insert: bumps updatedAt +
+ * lastSyncedAt, sets remoteItemCount = items.length, clears remoteStale.
+ * Songs that vanished upstream lose their membership row but their `songs`
+ * row is kept.
+ */
+export function syncImportedCollection(id: string, items: ImportedItem[]): void {
+  const now = new Date().toISOString();
+  db.transaction((tx) => {
+    for (const item of items) {
+      upsertSongMetadata(item);
+    }
+    // Replace membership with ALL kids in position order.
+    tx.delete(collectionSongs)
+      .where(eq(collectionSongs.collectionId, id))
+      .run();
+    const sorted = [...items].sort((a, b) => a.position - b.position);
+    sorted.forEach((item, idx) => {
+      tx.insert(collectionSongs)
+        .values({ collectionId: id, kid: item.kid, position: idx })
+        .run();
+    });
+    tx.update(collections)
+      .set({
+        updatedAt: now,
+        lastSyncedAt: now,
+        remoteItemCount: items.length,
+        remoteStale: false,
+      })
+      .where(eq(collections.id, id))
+      .run();
+  });
 }
 /**
  * Mark a collection's remote playlist as stale (no longer public / could
@@ -453,109 +558,6 @@ export function reorderCollection(collectionId: string, orderedKids: string[]): 
   replaceCollectionMembership(collectionId, orderedKids, {
     touchSyncedAt: col.source !== "local",
   });
-}
-/**
- * Replace the full remote playlist snapshot for a collection. Deletes all
- * existing `remote_playlist_items` rows for the collection, then inserts
- * the given items (position taken from `item.position`). Idempotent:
- * calling twice with the same input does not duplicate rows.
- */
-export function replaceRemotePlaylistItems(
-  collectionId: string,
-  items: RemotePlaylistItem[],
-): void {
-  db.transaction((tx) => {
-    tx.delete(remotePlaylistItems)
-      .where(eq(remotePlaylistItems.collectionId, collectionId))
-      .run();
-    items.forEach((item) => {
-      tx.insert(remotePlaylistItems)
-        .values({
-          collectionId,
-          kid: item.kid,
-          position: item.position,
-          title: item.title,
-          series: item.series,
-          singer: item.singer,
-          duration: item.duration,
-          payload: item.payload,
-        })
-        .run();
-    });
-  });
-}
-/** All remote playlist items for a collection, ordered by position asc. */
-export function getRemotePlaylistItems(collectionId: string): RemotePlaylistItem[] {
-  return db
-    .select()
-    .from(remotePlaylistItems)
-    .where(eq(remotePlaylistItems.collectionId, collectionId))
-    .orderBy(remotePlaylistItems.position)
-    .all();
-}
-/**
- * Remote playlist items for a collection, each flagged with whether the
- * song is already in the local `songs` table (left join on kid).
- * Ordered by position asc.
- */
-export function getRemotePlaylistItemsWithDownloaded(
-  collectionId: string,
-): (RemotePlaylistItem & { downloaded: boolean })[] {
-  const rows = db
-    .select({
-      item: remotePlaylistItems,
-      songKid: songs.kid,
-    })
-    .from(remotePlaylistItems)
-    .leftJoin(songs, eq(remotePlaylistItems.kid, songs.kid))
-    .where(eq(remotePlaylistItems.collectionId, collectionId))
-    .orderBy(remotePlaylistItems.position)
-    .all();
-  return rows.map((r) => ({
-    kid: r.item.kid,
-    position: r.item.position,
-    title: r.item.title,
-    series: r.item.series,
-    singer: r.item.singer,
-    duration: r.item.duration,
-    payload: r.item.payload,
-    downloaded: r.songKid !== null,
-  }));
-}
-/**
- * Delete `remote-own` collections whose `id` (the remote `plaid`) is not in
- * `keepPlaids`. When `keepPlaids` is empty, all `remote-own` rows are
- * deleted. `ON DELETE CASCADE` removes `collection_songs` and
- * `remote_playlist_items` rows only — never `songs` or files.
- *
- * Policy: rows for playlists that vanished upstream are DELETED (not marked
- * stale). The prune is keyed on `plaid` membership in the fetched set
- * rather than `ownerUsername` because with `includeUserAsContributor=true`
- * a contributed playlist's `ownerUsername` is the real owner, not the
- * logged-in user — keying on username would re-create and delete contributed
- * playlists on every sync.
- *
- * Returns the number of deleted collections.
- */
-export function pruneRemoteOwnPlaylists(keepPlaids: string[]): number {
-  const before = db
-    .select({ n: sql<number>`count(*)` })
-    .from(collections)
-    .where(eq(collections.source, "remote-own"))
-    .get()?.n ?? 0;
-  if (keepPlaids.length === 0) {
-    db.delete(collections).where(eq(collections.source, "remote-own")).run();
-  } else {
-    db.delete(collections)
-      .where(and(eq(collections.source, "remote-own"), notInArray(collections.id, keepPlaids)))
-      .run();
-  }
-  const after = db
-    .select({ n: sql<number>`count(*)` })
-    .from(collections)
-    .where(eq(collections.source, "remote-own"))
-    .get()?.n ?? 0;
-  return before - after;
 }
 /** A single collection by id, or undefined if not found. */
 export function getCollection(id: string): CollectionRow | undefined {
@@ -617,12 +619,13 @@ export function removeSongFromCollection(collectionId: string, kid: string): voi
     )
     .run();
 }
-/** Collections a given song belongs to (id + name). */
+/** Collections a given song belongs to (id + name). Only `source = 'local'`
+ *  collections are returned. */
 export function collectionsForSong(kid: string): { id: string; name: string }[] {
   return db
     .select({ id: collections.id, name: collections.name })
     .from(collectionSongs)
     .innerJoin(collections, eq(collectionSongs.collectionId, collections.id))
-    .where(eq(collectionSongs.kid, kid))
+    .where(and(eq(collectionSongs.kid, kid), eq(collections.source, "local")))
     .all();
 }

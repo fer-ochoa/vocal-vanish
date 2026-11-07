@@ -5,13 +5,13 @@
       <h1>{{ collection ? collection.name : 'Collection' }}</h1>
       <p class="muted">
         <span class="tag" :class="sourceBadgeClass(collection ? collection.source : 'local')">{{ collection ? collection.source : '…' }}</span>
-        <span v-if="isRemote" class="muted small">{{ downloadedCount }} of {{ rows.length }} downloaded</span>
+        <span v-if="isImported" class="muted small">{{ downloadedCount }} of {{ songs.length }} downloaded</span>
         <span v-else class="muted small">{{ songs.length }} song{{ songs.length === 1 ? '' : 's' }}</span>
-        <span v-if="isSubscribed && collection?.ownerUsername" class="muted small">by {{ collection.ownerUsername }}</span>
-        <span v-if="isSubscribed && collection?.lastSyncedAt" class="muted small">{{ syncedAgo(collection.lastSyncedAt) }}</span>
+        <span v-if="isImported && collection?.ownerUsername" class="muted small">by {{ collection.ownerUsername }}</span>
+        <span v-if="isImported && collection?.lastSyncedAt" class="muted small">{{ syncedAgo(collection.lastSyncedAt) }}</span>
       </p>
       <button
-        v-if="isRemote"
+        v-if="isImported"
         class="btn btn-primary"
         :disabled="bulkBusy || missingCount === 0"
         @click="downloadAllMissing"
@@ -19,20 +19,20 @@
         Download all missing ({{ missingCount }})
       </button>
       <button
-        v-if="isSubscribed"
+        v-if="isImported"
         class="btn"
         :disabled="syncing"
         @click="syncNow"
       >
-        {{ syncing ? 'Syncing…' : 'Sync now' }}
+        {{ syncing ? 'Syncing…' : 'Sync' }}
       </button>
     </header>
-    <!-- Stale banner (feat 08) -->
-    <div v-if="stale" class="stale-banner">
-      This playlist is no longer public on kara.moe — showing the last synced copy.
+    <!-- Stale banner -->
+    <div v-if="isImported && stale" class="stale-banner">
+      This playlist is no longer available on kara.moe — showing the last synced copy.
     </div>
     <!-- Local collections -->
-    <ul v-if="!isRemote && songs.length" class="list">
+    <ul v-if="!isImported && songs.length" class="list">
       <li v-for="(entry, idx) in songs" :key="entry.kid" class="row">
         <div class="row-main">
           <div class="row-title">{{ entry.title }}</div>
@@ -81,35 +81,44 @@
         </div>
       </li>
     </ul>
-    <!-- Remote-own collections (read-only snapshot) -->
-    <ul v-if="isRemote && rows.length" class="list">
-      <li v-for="row in rows" :key="row.kid" class="row">
+    <!-- Imported collections -->
+    <ul v-if="isImported && songs.length" class="list">
+      <li v-for="(entry, idx) in songs" :key="entry.kid" class="row">
         <div class="row-main">
-          <div class="row-title">{{ row.title }}</div>
+          <div class="row-title">{{ entry.title }}</div>
           <div class="row-sub">
-            <span class="muted small">{{ row.position }}.</span>
-            <span v-if="row.series" class="tag">{{ row.series }}</span>
-            <span v-if="row.singer" class="tag tag-dim">{{ row.singer }}</span>
-            <span v-if="row.duration != null" class="dur">{{ fmtDuration(row.duration) }}</span>
-            <span v-if="row.downloaded" class="tag tag-accent">Downloaded</span>
-            <span v-else class="tag tag-dim">Not downloaded</span>
+            <span class="muted small">{{ idx + 1 }}.</span>
+            <span v-if="entry.series" class="tag">{{ entry.series }}</span>
+            <span v-if="entry.singer" class="tag tag-dim">{{ entry.singer }}</span>
+            <span v-if="entry.duration != null" class="dur">{{ fmtDuration(entry.duration) }}</span>
           </div>
         </div>
         <div class="row-actions">
           <button
+            v-if="entry.downloaded"
             class="btn"
-            :disabled="!row.downloaded"
-            :title="row.downloaded ? 'Play' : 'Not downloaded yet'"
-            @click="play(row.kid)"
+            :class="playButtonClass(entry)"
+            :title="playButtonTitle(entry)"
+            @click="play(entry.kid)"
           >
             Play
           </button>
+          <template v-else>
+            <span class="tag tag-dim">Not Downloaded</span>
+            <button
+              class="btn"
+              :disabled="downloadingKid !== null"
+              @click="downloadOne(entry.kid)"
+            >
+              {{ downloadingKid === entry.kid ? 'Downloading…' : 'Download' }}
+            </button>
+          </template>
         </div>
       </li>
     </ul>
     <!-- Empty states -->
-    <p v-if="loaded && isRemote && !rows.length" class="muted">{{ stale ? 'This playlist is no longer public on kara.moe, and no copy of its contents was saved.' : 'This playlist is empty on kara.moe.' }}</p>
-    <p v-if="loaded && !isRemote && !songs.length" class="muted">No songs in this collection yet.</p>
+    <p v-if="loaded && isImported && !songs.length" class="muted">{{ stale ? 'This playlist is no longer available on kara.moe. Its last synced copy is shown above.' : 'This playlist is empty.' }}</p>
+    <p v-if="loaded && !isImported && !songs.length" class="muted">No songs in this collection yet.</p>
     <!-- Bulk download progress overlay -->
     <transition name="fade">
       <div v-if="bulkBusy || bulkSummary" class="overlay">
@@ -163,42 +172,31 @@ const router = useRouter();
 const collectionId = route.params.id as string;
 const tabFrom = computed(() => {
   const t = String(route.query.from ?? '');
-  return t === 'public' || t === 'mine' ? t : 'local';
+  return t === 'public' || t === 'mine' || t === 'imported' ? t : 'local';
 });
 function goBack(): void {
   router.push({ name: 'collections', query: { tab: tabFrom.value } });
 }
 const collection = ref<any>(null);
 const songs = ref<any[]>([]);
-const rows = ref<any[]>([]);
 const loaded = ref(false);
 const busy = ref(false);
 const error = ref('');
-const isRemote = computed(() =>
-  collection.value?.source === 'remote-own' || collection.value?.source === 'remote-subscribed'
-);
-const isSubscribed = computed(() => collection.value?.source === 'remote-subscribed');
+const isImported = computed(() => collection.value?.source === 'imported');
 const stale = ref(false);
 const syncing = ref(false);
-const downloadedCount = computed(() => rows.value.filter((r: any) => r.downloaded).length);
-// Songs in the collection not yet in the local library. Local collections can
-// only contain already-downloaded songs, so only remote-own can have a gap.
+const downloadingKid = ref<string | null>(null);
+const downloadedCount = computed(() => songs.value.filter((s: any) => s.downloaded).length);
+// Songs in the collection not yet downloaded locally.
 const missingCount = computed(() =>
-  isRemote.value ? rows.value.filter((r: any) => !r.downloaded).length : 0
+  isImported.value ? songs.value.filter((s: any) => !s.downloaded).length : 0
 );
 async function load(): Promise<void> {
   try {
-    // Load collection metadata
     const cols = await window.kara.collectionsList();
     collection.value = cols.find((c: any) => c.id === collectionId) || null;
-    // Load songs in order
-    if (collection.value && (collection.value.source === 'remote-own' || collection.value.source === 'remote-subscribed')) {
-      rows.value = await window.kara.collectionRemoteItems(collectionId);
-      // Show stale banner on load if the row is already marked stale
-      stale.value = collection.value.remoteStale === true;
-    } else {
-      songs.value = await window.kara.collectionSongs(collectionId);
-    }
+    songs.value = await window.kara.collectionSongs(collectionId);
+    stale.value = collection.value?.remoteStale === true;
     loaded.value = true;
   } catch (e) {
     error.value = (e as Error).message || 'Failed to load collection';
@@ -208,7 +206,7 @@ function play(kid: string): void {
   router.push({ name: 'player', params: { kid } });
 }
 async function removeSong(kid: string): Promise<void> {
-  if (isRemote.value) return;
+  if (isImported.value) return;
   if (!window.confirm('Remove this song from the collection? The song itself will not be deleted.')) return;
   busy.value = true;
   error.value = '';
@@ -222,7 +220,7 @@ async function removeSong(kid: string): Promise<void> {
   }
 }
 async function moveUp(idx: number): Promise<void> {
-  if (isRemote.value) return;
+  if (isImported.value) return;
   if (idx === 0) return;
   busy.value = true;
   error.value = '';
@@ -238,7 +236,7 @@ async function moveUp(idx: number): Promise<void> {
   }
 }
 async function moveDown(idx: number): Promise<void> {
-  if (isRemote.value) return;
+  if (isImported.value) return;
   if (idx === songs.value.length - 1) return;
   busy.value = true;
   error.value = '';
@@ -253,7 +251,21 @@ async function moveDown(idx: number): Promise<void> {
     busy.value = false;
   }
 }
-// --- Bulk download (feat 07) ----------------------------------------------
+// --- Single-song download (imported) ---------------------------------------
+async function downloadOne(kid: string): Promise<void> {
+  if (downloadingKid.value) return;
+  downloadingKid.value = kid;
+  error.value = '';
+  try {
+    await window.kara.collectionDownloadSong(collectionId, kid);
+    songs.value = await window.kara.collectionSongs(collectionId);
+  } catch (e) {
+    error.value = (e as Error).message || 'Download failed';
+  } finally {
+    downloadingKid.value = null;
+  }
+}
+// --- Bulk download (imported) ----------------------------------------------
 const bulkBusy = ref(false);
 const bulkTotal = ref(0);
 const bulkDone = ref(0);
@@ -263,7 +275,7 @@ let offBulkProgress: (() => void) | null = null;
 let offBulkBytes: (() => void) | null = null;
 const bulkInFlightList = computed(() => Object.values(bulkInFlight.value));
 function bulkTitle(kid: string): string {
-  return rows.value.find((r: any) => r.kid === kid)?.title || kid;
+  return songs.value.find((s: any) => s.kid === kid)?.title || kid;
 }
 function bulkPct(item: { received: number; total: number | null }): number {
   if (!item.total) return 0;
@@ -314,18 +326,19 @@ async function downloadAllMissing(): Promise<void> {
 function closeBulkSummary(): void {
   bulkSummary.value = null;
 }
-// --- Sync subscribed collection (feat 08) ----------------------------------
+// --- Sync imported collection ----------------------------------------------
 async function syncNow(): Promise<void> {
   if (syncing.value) return;
   syncing.value = true;
   error.value = '';
   try {
-    const result = await window.kara.collectionSyncSubscribed(collectionId);
-    rows.value = result.items;
+    const result = await window.kara.collectionSyncImported(collectionId);
     stale.value = result.stale;
     // Refresh the collection row to pick up updated lastSyncedAt
     const cols = await window.kara.collectionsList();
     collection.value = cols.find((c: any) => c.id === collectionId) || collection.value;
+    // Reload songs
+    songs.value = await window.kara.collectionSongs(collectionId);
   } catch (e) {
     error.value = (e as Error).message || 'Failed to sync playlist';
   } finally {
@@ -335,7 +348,7 @@ async function syncNow(): Promise<void> {
 // --- Helpers ---------------------------------------------------------------
 function sourceBadgeClass(source: string): string {
   if (source === 'local') return 'tag-accent';
-  if (source === 'remote-own') return 'tag-lang';
+  if (source === 'imported') return 'tag-lang';
   return 'tag-dim';
 }
 function playButtonClass(entry: any): string {
@@ -368,7 +381,7 @@ onMounted(load);
 watch(() => route.params.id, (newId) => {
   if (newId && newId !== collectionId) {
     // Re-navigate to the new collection, preserving the query string
-    // (e.g. the `from` tab hint) so it survives subscribe/sync re-navigation.
+    // (e.g. the `from` tab hint) so it survives import/sync re-navigation.
     router.replace({ name: 'collection-detail', params: { id: newId }, query: { ...route.query } });
   }
 });

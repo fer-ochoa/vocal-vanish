@@ -16,20 +16,29 @@ export interface SearchRow {
   downloaded: boolean;
 }
 
+/**
+ * A song the app knows about. A row may exist for a song that is NOT
+ * downloaded: `file === null` (and `downloadedAt === null`) means "not
+ * downloaded". `downloaded` is derived from `file !== null`.
+ */
 export interface CatalogEntry {
   kid: string;
   title: string;
   series: string;
   singer: string;
   duration: number | null;
-  file: string;
+  /** Filename of the hardsub video inside the catalog dir; null = not downloaded. */
+  file: string | null;
   size: number | null;
-  downloadedAt: string;
+  /** ISO date; null = not downloaded. */
+  downloadedAt: string | null;
   lyriclessFile?: string | null;
   /** Language codes of the song, e.g. ['JPN']. Undefined until backfilled. */
   langs?: string[];
   /** True when the song's version is 'Off Vocal' (already instrumental). */
   offVocal?: boolean;
+  /** Derived: true when the song has a media file (is downloaded). */
+  downloaded: boolean;
 }
 
 export interface LyriclessStatus {
@@ -48,11 +57,22 @@ export interface AppSettings {
   /** unblend model id used to generate lyricless videos. */
   separationModel: string;
 }
-/** A collection row (mirrors CollectionRow in src/db/queries.ts). */
+/**
+ * A collection row (mirrors CollectionRow in src/db/queries.ts).
+ *
+ * `local` collections are created in-app and are editable. `imported`
+ * collections are local, READ-ONLY copies of a kara.moe playlist: they store
+ * the source `remotePlaid` plus the metadata of every song in it, and the only
+ * mutations are Sync (re-pull from the source) and Download (per song or bulk).
+ */
 export interface CollectionRow {
   id: string;
   name: string;
-  source: 'local' | 'remote-own' | 'remote-subscribed';
+  source: 'local' | 'imported';
+  /** Provenance of an imported collection; null for local ones. */
+  origin: 'own' | 'public' | null;
+  /** Source kara.moe playlist id; null for local collections. */
+  remotePlaid: string | null;
   ownerUsername: string | null;
   createdAt: string;
   updatedAt: string;
@@ -61,9 +81,12 @@ export interface CollectionRow {
   /** True when the remote playlist is no longer reachable (deleted / made private). */
   remoteStale: boolean;
 }
-/** A collection row with its song count (from `kara:collections-list`). */
+/** A collection row with its song counts (from `kara:collections-list`). */
 export interface CollectionRowWithCount extends CollectionRow {
+  /** Membership rows (downloaded or not). */
   songCount: number;
+  /** Membership rows whose song has a media file. */
+  downloadedCount: number;
 }
 /** Allowed `order` values for the kara.moe playlist list (mirrors PlaylistOrder in src/kara-api.ts). */
 export type PlaylistOrder = 'az' | 'recent' | 'karacount' | 'duration' | 'username';
@@ -81,23 +104,6 @@ export interface RemotePlaylist {
   nickname?: string | null;
   flag_visible?: boolean | null;
   flag_visible_online?: boolean | null;
-}
-/** Result of re-syncing a `remote-subscribed` collection (feat 08). */
-export interface SubscribedSyncResult {
-  items: RemoteItemRow[];
-  stale: boolean;
-}
-/** One row of a remote playlist snapshot (mirrors the main-process shape). */
-export interface RemoteItemRow {
-  kid: string;
-  position: number;
-  title: string;
-  series: string;
-  singer: string;
-  duration: number | null;
-  payload: string | null;
-  /** True when the song is already in the local catalog. */
-  downloaded: boolean;
 }
 /** Summary returned by a bulk collection download (feat 07). */
 export interface BulkDownloadSummary {
@@ -304,32 +310,53 @@ const api = {
   collectionsForSong(kid: string): Promise<{ id: string; name: string }[]> {
     return ipcRenderer.invoke('kara:collections-for-song', kid);
   },
-  // --- Remote-own playlists (feat 06) ------------------------------------
+  // --- Imported collections ----------------------------------------------
   /**
-   * Sync the logged-in user's kara.moe playlists into `remote-own` collections.
-   * Returns the refreshed collection list. When logged out it resolves with the
-   * current list unchanged (never throws), so the Collections screen can call it
-   * unconditionally.
+   * List the logged-in user's kara.moe playlists. Discovery only — writes
+   * nothing to the DB. Resolves with [] when logged out.
    */
-  collectionSyncRemoteOwn(opts?: { filter?: string; order?: PlaylistOrder }): Promise<CollectionRowWithCount[]> {
-    return ipcRenderer.invoke('kara:collection-sync-remote-own', opts);
+  playlistsMine(opts?: { filter?: string; order?: PlaylistOrder }): Promise<RemotePlaylist[]> {
+    return ipcRenderer.invoke('kara:playlists-mine', opts);
   },
   /**
-   * Ordered snapshot rows of a `remote-own` collection, each flagged
-   * `downloaded` against the global `songs` table. Fetches from kara.moe on
-   * first open. Resolves with [] for non-remote collections.
+   * Import a kara.moe playlist as a local, read-only collection: fetches its
+   * contents, stores the source plaid plus every song's metadata, and creates
+   * the membership rows. Downloads NOTHING. Importing an already-imported
+   * playlist syncs it instead of creating a duplicate.
    */
-  collectionRemoteItems(collectionId: string): Promise<RemoteItemRow[]> {
-    return ipcRenderer.invoke('kara:collection-remote-items', collectionId);
+  collectionImport(params: {
+    plaid: string;
+    name?: string;
+    ownerUsername?: string | null;
+    origin?: 'own' | 'public';
+  }): Promise<CollectionRow> {
+    return ipcRenderer.invoke('kara:collection-import', params);
+  },
+  /**
+   * Re-sync an imported collection from its source playlist. On success
+   * refreshes metadata + membership and clears the stale flag; on failure
+   * (playlist deleted / made private) marks it stale and keeps the local copy.
+   */
+  collectionSyncImported(
+    collectionId: string,
+  ): Promise<{ downloadedCount: number; total: number; stale: boolean }> {
+    return ipcRenderer.invoke('kara:collection-sync-imported', collectionId);
+  },
+  /**
+   * Download ONE song inside a collection. The song stays a member of the
+   * collection (it may have been a metadata-only member before).
+   */
+  collectionDownloadSong(collectionId: string, kid: string): Promise<CatalogEntry> {
+    return ipcRenderer.invoke('kara:collection-download-song', collectionId, kid);
   },
   // --- Bulk collection download (feat 07) --------------------------------
   /**
-   * Download every song in a collection that is not already in the local
-   * library. Re-syncs a `remote-own` playlist first, downloads only the
-   * missing kids (concurrency-capped), and reports per-song byte progress on
-   * the existing `onDownloadProgress` listener plus per-song status on
-   * `onCollectionDownloadProgress`. Resolves with a summary; individual song
-   * failures are reported in `failed` and never abort the batch.
+   * Download every song in a collection that is not already downloaded.
+   * Uses the collection's existing membership — it does NOT re-sync from the
+   * network (sync is an explicit user action). Reports per-song byte progress
+   * on `onDownloadProgress` and per-song status on
+   * `onCollectionDownloadProgress`. Individual failures are reported in
+   * `failed` and never abort the batch.
    */
   collectionDownload(collectionId: string): Promise<BulkDownloadSummary> {
     return ipcRenderer.invoke('kara:collection-download', collectionId);
@@ -343,7 +370,7 @@ const api = {
     ipcRenderer.on('kara:collection-download-progress', listener);
     return () => ipcRenderer.removeListener('kara:collection-download-progress', listener);
   },
-  // --- Remote-subscribed playlists (feat 08) -----------------------------
+  // --- Browse another user's public playlists ---
   /**
    * Browse another user's public kara.moe playlists (server-side
    * `byUsername` filter). Pure discovery — no DB writes, no auth required
@@ -357,28 +384,6 @@ const api = {
     refresh?: boolean;
   }): Promise<RemotePlaylist[]> {
     return ipcRenderer.invoke('kara:collection-browse-user', opts);
-  },
-  /**
-   * Subscribe to a remote playlist: upserts the `remote-subscribed`
-   * collection row, fetches its contents, persists the ordered snapshot +
-   * membership, and returns the collection row. Idempotent — subscribing
-   * twice does not duplicate the row or the snapshot.
-   */
-  collectionSubscribe(params: {
-    plaid: string;
-    name?: string;
-    ownerUsername?: string | null;
-  }): Promise<CollectionRow> {
-    return ipcRenderer.invoke('kara:collection-subscribe', params);
-  },
-  /**
-   * Re-sync a `remote-subscribed` collection from kara.moe. On success
-   * refreshes the snapshot + membership and clears the stale flag; on
-   * failure (playlist deleted / made private) marks it stale and returns the
-   * persisted snapshot. Resolves with `{ items, stale }`.
-   */
-  collectionSyncSubscribed(collectionId: string): Promise<SubscribedSyncResult> {
-    return ipcRenderer.invoke('kara:collection-sync-subscribed', collectionId);
   },
 };
 

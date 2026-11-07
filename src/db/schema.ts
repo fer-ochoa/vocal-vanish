@@ -1,9 +1,8 @@
 import { sqliteTable, text, integer, primaryKey } from "drizzle-orm/sqlite-core";
 /**
- * One row per downloaded song. This is the entire "do I have this song, and
- * where" bookkeeping table — equivalent to today's catalog.json, but as SQL
- * rows instead of a hand-maintained JSON object. The primary key is kara.moe's
- * own `kid` (UUID).
+ * One row per song the app knows about (metadata catalog). A row may exist
+ * for a song that is NOT downloaded: `mediaFile === null` means "not
+ * downloaded". The primary key is kara.moe's own `kid` (UUID).
  */
 export const songs = sqliteTable("songs", {
   kid: text("kid").primaryKey(),
@@ -11,7 +10,7 @@ export const songs = sqliteTable("songs", {
   series: text("series").notNull().default(""),
   singer: text("singer").notNull().default(""),
   duration: integer("duration"), // seconds; nullable (kara.moe can omit it)
-  mediaFile: text("media_file").notNull(), // filename of the hardsub video inside the catalog dir
+  mediaFile: text("media_file"), // filename of the hardsub video inside the catalog dir; null = not downloaded
   mediaSize: integer("media_size"), // bytes
   lyriclessFile: text("lyricless_file"), // filename of the lyricless variant, or null
   thumbnailFile: text("thumbnail_file"), // filename of the thumbnail, or null (future)
@@ -19,19 +18,21 @@ export const songs = sqliteTable("songs", {
   offVocal: integer("off_vocal", { mode: "boolean" })
     .notNull()
     .default(false),
-  downloadedAt: text("downloaded_at").notNull(), // ISO 8601 string
+  downloadedAt: text("downloaded_at"), // ISO 8601 string; null = not downloaded
 });
 /**
- * One row per collection the app knows about: the user's own (synced from
- * kara.moe after login), other users' public collections the user has
- * browsed/subscribed to, and purely local ones created in-app.
+ * One row per collection the app knows about: purely local ones created
+ * in-app, and imported copies of kara.moe playlists (local mirror of a
+ * remote playlist).
  */
 export const collections = sqliteTable("collections", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   source: text("source", {
-    enum: ["local", "remote-own", "remote-subscribed"],
+    enum: ["local", "imported"],
   }).notNull(),
+  origin: text("origin", { enum: ["own", "public"] }), // null for local
+  remotePlaid: text("remote_plaid"), // source kara.moe playlist id; null for local
   ownerUsername: text("owner_username"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
@@ -56,31 +57,6 @@ export const collectionSongs = sqliteTable(
       .notNull()
       .references(() => songs.kid, { onDelete: "cascade" }),
     position: integer("position").notNull(),
-  },
-  (t) => ({
-    pk: primaryKey({ columns: [t.collectionId, t.kid] }),
-  }),
-);
-/**
- * Ordered snapshot of a remote playlist's full content (feat 06). Unlike
- * `collection_songs`, there is deliberately NO foreign key to `songs`: a
- * remote playlist contains songs the user has not downloaded, and those
- * rows must still be stored so the detail view can flag them "not
- * downloaded". Deleting a collection cascades here.
- */
-export const remotePlaylistItems = sqliteTable(
-  "remote_playlist_items",
-  {
-    collectionId: text("collection_id")
-      .notNull()
-      .references(() => collections.id, { onDelete: "cascade" }),
-    kid: text("kid").notNull(),
-    position: integer("position").notNull(), // 1-based remote `pos`
-    title: text("title").notNull().default(""),
-    series: text("series").notNull().default(""),
-    singer: text("singer").notNull().default(""),
-    duration: integer("duration"),
-    payload: text("payload"), // raw JSON of the fetched playlist content row
   },
   (t) => ({
     pk: primaryKey({ columns: [t.collectionId, t.kid] }),

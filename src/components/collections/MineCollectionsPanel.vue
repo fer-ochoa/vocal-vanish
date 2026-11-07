@@ -2,7 +2,7 @@
   <div class="mine-collections-panel">
     <!-- Sync toolbar -->
     <div class="new-collection">
-      <select v-model="order" class="input input-sm" @change="syncNow">
+      <select v-model="order" class="input input-sm" @change="refreshList">
         <option value="az">A–Z</option>
         <option value="recent">Most recent</option>
         <option value="karacount">Most songs</option>
@@ -14,17 +14,41 @@
         class="input input-sm"
         placeholder="Filter playlists…"
         spellcheck="false"
-        @keyup.enter="syncNow"
+        @keyup.enter="refreshList"
       />
-      <button class="btn btn-primary" :disabled="syncing" @click="syncNow">
-        {{ syncing ? 'Syncing…' : 'Sync now' }}
+      <button class="btn btn-primary" :disabled="refreshing" @click="refreshList">
+        {{ refreshing ? 'Refreshing…' : 'Refresh list' }}
       </button>
       <span v-if="lastSyncedLabel" class="muted small">{{ lastSyncedLabel }}</span>
     </div>
-    <!-- remote-own rows -->
-    <ul v-if="collections.length" class="list">
+    <!-- Fetched playlists -->
+    <ul v-if="playlists.length" class="list">
+      <li v-for="pl in playlists" :key="pl.plaid" class="row">
+        <div class="row-main">
+          <div class="row-title">{{ pl.name }}</div>
+          <div class="row-sub">
+            <span class="muted small">{{ pl.karacount ?? 0 }} songs</span>
+            <span class="muted small">by {{ pl.nickname || pl.username }}</span>
+          </div>
+        </div>
+        <div class="row-actions">
+          <button
+            class="btn btn-ghost"
+            :disabled="isImported(pl) || importingPlaid === pl.plaid"
+            @click.stop="importPlaylist(pl)"
+          >
+            {{ importingPlaid === pl.plaid ? '…' : isImported(pl) ? 'Imported ✓' : 'Import' }}
+          </button>
+          <span v-if="importError[pl.plaid]" class="browse-row-error">{{ importError[pl.plaid] }}</span>
+        </div>
+      </li>
+    </ul>
+    <p v-else-if="loggedIn && !refreshing" class="muted">No kara.moe playlists found.</p>
+    <!-- Already-imported own collections -->
+    <h2 v-if="importedOwn.length" style="font-size: 15px; margin: 14px 0 10px;">Imported</h2>
+    <ul v-if="importedOwn.length" class="list">
       <li
-        v-for="col in collections"
+        v-for="col in importedOwn"
         :key="col.id"
         class="row"
         @click="emit('open', col.id)"
@@ -32,20 +56,19 @@
         <div class="row-main">
           <div class="row-title">{{ col.name }}</div>
           <div class="row-sub">
-            <span class="muted small">{{ col.songCount }} of {{ col.remoteItemCount ?? col.songCount }} downloaded</span>
-            <span v-if="col.ownerUsername && col.ownerUsername !== username" class="muted small">by {{ col.ownerUsername }}</span>
+            <span class="muted small">{{ col.downloadedCount }} of {{ col.songCount }} downloaded</span>
             <span v-if="col.lastSyncedAt" class="muted small">{{ syncedAgo(col.lastSyncedAt) }}</span>
             <span v-if="col.remoteStale === true" class="tag tag-dim" title="This playlist is no longer public on kara.moe">no longer public</span>
           </div>
         </div>
       </li>
     </ul>
-    <p v-else-if="!loggedIn" class="muted">Log in on the Config screen to see your kara.moe playlists.</p>
-    <p v-else class="muted">No kara.moe playlists yet — press “Sync now”.</p>
+    <p v-if="!loggedIn" class="muted">Log in on the Config screen to see your kara.moe playlists.</p>
   </div>
 </template>
 <script setup lang="ts">
 import { ref, computed } from 'vue';
+import type { RemotePlaylist, PlaylistOrder } from '../../preload';
 
 const props = defineProps<{
   collections: any[];
@@ -60,35 +83,62 @@ const emit = defineEmits<{
 }>();
 
 // --- Sync toolbar ----------------------------------------------------------
-const syncing = ref(false);
-const order = ref<'az' | 'recent' | 'karacount' | 'duration' | 'username'>('az');
+const refreshing = ref(false);
+const order = ref<PlaylistOrder>('az');
 const filter = ref('');
-async function syncNow(): Promise<void> {
-  if (syncing.value) return;
-  syncing.value = true;
+const playlists = ref<RemotePlaylist[]>([]);
+const importingPlaid = ref<string | null>(null);
+const importError = ref<Record<string, string>>({});
+async function refreshList(): Promise<void> {
+  if (refreshing.value) return;
+  refreshing.value = true;
   try {
-    await window.kara.collectionSyncRemoteOwn({
-      filter: filter.value,
+    playlists.value = await window.kara.playlistsMine({
+      filter: filter.value || undefined,
       order: order.value,
+    });
+  } catch (e) {
+    emit('error', (e as Error).message || 'Failed to fetch playlists');
+  } finally {
+    refreshing.value = false;
+  }
+}
+function isImported(pl: RemotePlaylist): boolean {
+  return props.collections.some((c: any) => c.remotePlaid === pl.plaid);
+}
+async function importPlaylist(pl: RemotePlaylist): Promise<void> {
+  if (importingPlaid.value || isImported(pl)) return;
+  importingPlaid.value = pl.plaid;
+  const errKey = pl.plaid;
+  delete importError.value[errKey];
+  try {
+    await window.kara.collectionImport({
+      plaid: pl.plaid,
+      name: pl.name,
+      ownerUsername: pl.username ?? null,
+      origin: 'own',
     });
     emit('refresh');
   } catch (e) {
-    emit('error', (e as Error).message || 'Failed to sync playlists');
+    importError.value = { ...importError.value, [errKey]: (e as Error).message || 'Failed to import' };
   } finally {
-    syncing.value = false;
+    importingPlaid.value = null;
   }
 }
-
-/** "Synced 3m ago" across all remote-own rows; '' when none. */
+const importedOwn = computed(() =>
+  props.collections.filter((c: any) => c.source === 'imported' && c.origin === 'own'),
+);
 const lastSyncedLabel = computed(() => {
-  const times = props.collections
-    .filter((c: any) => c.source === 'remote-own' && c.lastSyncedAt)
+  const times = importedOwn.value
+    .filter((c: any) => c.lastSyncedAt)
     .map((c: any) => new Date(c.lastSyncedAt).getTime())
     .filter((t: number) => !isNaN(t));
   if (!times.length) return '';
   const latest = Math.max(...times);
   return syncedAgo(new Date(latest).toISOString());
 });
+
+
 
 // --- Helpers ---------------------------------------------------------------
 function syncedAgo(iso: string | null): string {

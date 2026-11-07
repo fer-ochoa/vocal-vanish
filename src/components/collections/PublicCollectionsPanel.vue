@@ -1,10 +1,10 @@
 <template>
   <div class="public-collections-panel">
-    <!-- Subscribed public playlists -->
-    <h2 style="font-size: 15px; margin: 0 0 10px;">Subscribed</h2>
-    <ul v-if="subscribedCollections.length" class="list">
+    <!-- Imported from public playlists -->
+    <h2 style="font-size: 15px; margin: 0 0 10px;">Imported from public playlists</h2>
+    <ul v-if="importedCollections.length" class="list">
       <li
-        v-for="col in subscribedCollections"
+        v-for="col in importedCollections"
         :key="col.id"
         class="row"
         @click="emit('open', col.id)"
@@ -29,7 +29,7 @@
         </div>
       </li>
     </ul>
-    <p v-else class="muted">Not subscribed to any public playlist yet — browse a kara.moe user below.</p>
+    <p v-else class="muted">No public playlists imported yet — browse a kara.moe user below.</p>
     <!-- Browse a kara.moe user (feat 08) — public data, works logged out -->
     <details class="browse-panel" open>
       <summary class="browse-summary">Browse a kara.moe user</summary>
@@ -85,12 +85,12 @@
           <div class="row-actions">
             <button
               class="btn btn-ghost"
-              :disabled="isSubscribed(pl) || subscribingPlaid === pl.plaid"
-              @click.stop="subscribe(pl)"
+              :disabled="isImported(pl) || importingPlaid === pl.plaid"
+              @click.stop="importPlaylist(pl)"
             >
-              {{ subscribingPlaid === pl.plaid ? '…' : isSubscribed(pl) ? 'Subscribed' : 'Subscribe' }}
+              {{ importingPlaid === pl.plaid ? '…' : isImported(pl) ? 'Imported ✓' : 'Import' }}
             </button>
-            <span v-if="subscribeError[pl.plaid]" class="browse-row-error">{{ subscribeError[pl.plaid] }}</span>
+            <span v-if="importError[pl.plaid]" class="browse-row-error">{{ importError[pl.plaid] }}</span>
           </div>
         </li>
       </ul>
@@ -113,9 +113,9 @@ const emit = defineEmits<{
   (e: 'error', message: string): void;
 }>();
 
-/** `remote-subscribed` rows from the full collections list. */
-const subscribedCollections = computed(() =>
-  props.collections.filter((c: any) => c.source === 'remote-subscribed'),
+/** `imported` + `origin === 'public'` rows from the full collections list. */
+const importedCollections = computed(() =>
+  props.collections.filter((c: any) => c.source === 'imported' && c.origin === 'public'),
 );
 
 // --- Browse a kara.moe user (feat 08) --------------------------------------
@@ -127,8 +127,8 @@ const browsing = ref(false);
 const hasBrowsed = ref(false);
 const browseResults = ref<RemotePlaylist[]>([]);
 const browseError = ref('');
-const subscribingPlaid = ref<string | null>(null);
-const subscribeError = ref<Record<string, string>>({});
+const importingPlaid = ref<string | null>(null);
+const importError = ref<Record<string, string>>({});
 async function browseUser(refresh = false): Promise<void> {
   if (!browseUsername.value || browsing.value) return;
   browsing.value = true;
@@ -164,25 +164,26 @@ function isSharedBy(pl: RemotePlaylist): boolean {
   if (!pl.username || !browseUsername.value) return false;
   return pl.username.toLowerCase() !== browseUsername.value.toLowerCase();
 }
-function isSubscribed(pl: RemotePlaylist): boolean {
-  return props.collections.some((c: any) => c.id === pl.plaid);
+function isImported(pl: RemotePlaylist): boolean {
+  return props.collections.some((c: any) => c.remotePlaid === pl.plaid);
 }
-async function subscribe(pl: RemotePlaylist): Promise<void> {
-  if (subscribingPlaid.value || isSubscribed(pl)) return;
-  subscribingPlaid.value = pl.plaid;
+async function importPlaylist(pl: RemotePlaylist): Promise<void> {
+  if (importingPlaid.value || isImported(pl)) return;
+  importingPlaid.value = pl.plaid;
   const errKey = pl.plaid;
-  delete subscribeError.value[errKey];
+  delete importError.value[errKey];
   try {
-    await window.kara.collectionSubscribe({
+    await window.kara.collectionImport({
       plaid: pl.plaid,
       name: pl.name,
       ownerUsername: pl.username ?? null,
+      origin: 'public',
     });
     emit('refresh');
   } catch (e) {
-    subscribeError.value = { ...subscribeError.value, [errKey]: (e as Error).message || 'Failed to subscribe' };
+    importError.value = { ...importError.value, [errKey]: (e as Error).message || 'Failed to import' };
   } finally {
-    subscribingPlaid.value = null;
+    importingPlaid.value = null;
   }
 }
 function fmtBrowseDuration(seconds: number): string {

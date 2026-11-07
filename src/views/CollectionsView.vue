@@ -29,6 +29,15 @@
       @remove="remove"
       @error="showError"
     />
+    <ImportedCollectionsPanel
+      v-else-if="activeTab === 'imported'"
+      :collections="importedCollections"
+      :loaded="loaded"
+      @refresh="load"
+      @open="openDetail"
+      @remove="remove"
+      @error="showError"
+    />
     <PublicCollectionsPanel
       v-else-if="activeTab === 'public'"
       :collections="collections"
@@ -40,7 +49,7 @@
     />
     <MineCollectionsPanel
       v-else
-      :collections="mineCollections"
+      :collections="collections"
       :logged-in="loggedIn"
       :username="username"
       @refresh="load"
@@ -56,6 +65,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import LocalCollectionsPanel from '../components/collections/LocalCollectionsPanel.vue';
+import ImportedCollectionsPanel from '../components/collections/ImportedCollectionsPanel.vue';
 import MineCollectionsPanel from '../components/collections/MineCollectionsPanel.vue';
 import PublicCollectionsPanel from '../components/collections/PublicCollectionsPanel.vue';
 
@@ -108,8 +118,8 @@ function openDetail(id: string): void {
 }
 
 // --- Tab state -------------------------------------------------------------
-type CollectionsTab = 'local' | 'public' | 'mine';
-const VALID_TABS: CollectionsTab[] = ['local', 'public', 'mine'];
+type CollectionsTab = 'local' | 'imported' | 'public' | 'mine';
+const VALID_TABS: CollectionsTab[] = ['local', 'imported', 'public', 'mine'];
 const activeTab = ref<CollectionsTab>('local');
 
 function readTabFromQuery(): CollectionsTab {
@@ -132,21 +142,25 @@ watch(loggedIn, enforceTab);
 
 // --- Computed slices -------------------------------------------------------
 const localCollections = computed(() => collections.value.filter((c: any) => c.source === 'local'));
-const mineCollections = computed(() => loggedIn.value ? collections.value.filter((c: any) => c.source === 'remote-own') : []);
-const subscribedCollections = computed(() => collections.value.filter((c: any) => c.source === 'remote-subscribed'));
+const importedCollections = computed(() => collections.value.filter((c: any) => c.source === 'imported'));
+const mineCollections = computed(() => collections.value.filter((c: any) => c.source === 'imported' && c.origin === 'own'));
+const publicImportedCollections = computed(() => collections.value.filter((c: any) => c.source === 'imported' && c.origin === 'public'));
 
 const tabs = computed(() => [
   { id: 'local' as CollectionsTab, label: 'Local', count: localCollections.value.length, disabled: false, hint: 'Collections stored on this machine' },
-  { id: 'public' as CollectionsTab, label: 'Public', count: subscribedCollections.value.length, disabled: false, hint: 'Browse public kara.moe playlists and what you subscribed to' },
+  { id: 'imported' as CollectionsTab, label: 'Imported', count: importedCollections.value.length, disabled: false, hint: 'Local copies of kara.moe playlists you imported' },
+  { id: 'public' as CollectionsTab, label: 'Public', count: publicImportedCollections.value.length, disabled: false, hint: 'Browse public kara.moe playlists and what you imported' },
   { id: 'mine' as CollectionsTab, label: 'Mine', count: mineCollections.value.length, disabled: !loggedIn.value, hint: loggedIn.value ? 'Your own kara.moe playlists' : 'Log in on the Config screen to see your kara.moe playlists' },
 ]);
 
 const subtitle = computed(() =>
   activeTab.value === 'local'
     ? 'Collections of downloaded songs stored on this machine.'
-    : activeTab.value === 'public'
-      ? 'Public kara.moe playlists you can browse and subscribe to.'
-      : 'Your own kara.moe playlists, mirrored from kara.moe.',
+    : activeTab.value === 'imported'
+      ? 'Local copies of kara.moe playlists you imported.'
+      : activeTab.value === 'public'
+        ? 'Public kara.moe playlists you can browse and import.'
+        : 'Your own kara.moe playlists, mirrored from kara.moe.',
 );
 
 onMounted(() => {

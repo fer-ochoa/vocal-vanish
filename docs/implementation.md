@@ -9,9 +9,10 @@ This document is a complete, self-contained description of how this project is b
 A desktop client for the **Kara moe API** (anime karaoke videos with hardcoded subtitles). Four screens:
 
 1. **Search** — query the Kara moe database, show paginated results, download a song's hardsubbed video.
-2. **Catalog** — list locally downloaded songs (title, series, singer, duration), filter, play, delete, generate lyricless versions.
-3. **Config** — pick the stem-separation model used for lyricless generation (persisted) and show whether processing will run on WebGPU or fall back to CPU WebAssembly.
-4. **Player** — play a downloaded video with video.js (subtitles are burned in, so no separate track is needed).
+2. **Catalog** — list every song the app knows about (title, series, singer, duration), filter, play, delete, generate lyricless versions. Metadata-only rows (known but not downloaded) show a *Not Downloaded* chip, no Play/Lyricless buttons, and a Download button.
+3. **Collections** — manage song collections in four tabs: **Local · Imported · Public · Mine**. Local collections are created in-app and editable; imported collections are local, read-only copies of kara.moe playlists (the only mutations are Sync and Download).
+4. **Config** — pick the stem-separation model used for lyricless generation (persisted) and show whether processing will run on WebGPU or fall back to CPU WebAssembly.
+5. **Player** — play a downloaded video with video.js (subtitles are burned in, so no separate track is needed).
 
 The app is a **proof of concept**: simple, minimal UI, no auth, and a single minimal Config screen.
 
@@ -123,9 +124,30 @@ This file owns everything privileged. Major sections:
 
 ### Catalog storage
 - **Directory:** `path.join(app.getPath('userData'), 'kara-catalog')`. On Linux that's `~/.config/vocal-vanish/kara-catalog/`.
-- **Index file:** `catalog.json` in that directory — a `Record<kid, CatalogEntry>`.
-- Helpers: `ensureCatalogDir()`, `readIndex()`, `writeIndex(index)`, `songToRow(song)`.
-- Video files are saved into the same directory as `<kid>.<size>.<hash>.mp4` (the `hardsubbed_mediafile` name).
+- **Index:** `library.db` (SQLite, WAL mode) in that directory — the only index; it replaced `catalog.json`. All DB access lives in `src/db/`: `schema.ts` (Drizzle table definitions), `queries.ts` (typed query helpers), `index.ts` (opens the DB and runs idempotent startup DDL — no migration tooling).
+- **Media layout:** one folder per song, `media/<kid>/`, holding the hardsub video under kara.moe's own filename (`<kid>.<size>.<hash>.mp4`) plus `lyricless.mp4` when generated. In-flight downloads live in `tmp/<kid>.part` and are atomically renamed into `media/<kid>/` on completion. Helpers in `src/storage.ts`: `mediaDir(kid)`, `ensureMediaDir(kid)`, `ensureTmpDir()`, `cleanupTmp()`.
+
+### Database schema (`src/db/schema.ts`)
+The SQLite database (`library.db`) is the single source of truth for all catalog and collection data. Four tables:
+
+- **`songs`** — a **metadata catalog**, not a download list. One row per song the app *knows about* (downloaded or not). `media_file` and `downloaded_at` are **nullable**; `downloaded` is **derived** (`media_file !== null`) and never stored. `getAllSongs()` returns every row (Catalog screen); `getDownloadedSongs()` returns only downloaded rows.
+- **`collections`** — `source` is `'local' | 'imported'`.
+  - `local` — created in-app, editable (add / remove / reorder songs).
+  - `imported` — a local, **read-only** copy of a kara.moe playlist. `id` is a local UUID; `remote_plaid` holds the source playlist id (unique index); `origin` is `'own' | 'public'`; `owner_username`, `last_synced_at`, `remote_item_count`, `remote_stale` are kept. No add, no remove, no reorder — the only mutations are **Sync** and **Download**.
+- **`collection_songs`** — many-to-many membership with explicit `position` ordering. There is **no** separate snapshot table; the ordered snapshot of an imported playlist lives here (membership rows for all songs, including undownloaded ones) plus the `songs` metadata rows.
+- **`account`** — singleton row (id = 1) holding the current kara.moe login session.
+
+### Import → Sync → Download lifecycle
+Three distinct, explicit user actions — never automatic:
+
+1. **Import** (`kara:collection-import`) — fetches `GET /api/playlist/{plaid}` (paginated, public, no Authorization header), stores the source plaid + every song's metadata in `songs`, and creates membership rows for **all** songs in remote order. Downloads **nothing**. Importing an already-imported plaid syncs it instead of duplicating.
+2. **Sync** (`kara:collection-sync-imported`) — re-pulls the playlist, refreshes metadata + membership, bumps `last_synced_at`, clears `remote_stale`. On failure (playlist deleted / made private) marks the collection stale and keeps the local copy.
+3. **Download** (`kara:collection-download-song` for one song, `kara:collection-download` for all missing) — uses the collection's existing membership; neither re-syncs from the network. Bulk download runs at concurrency 2 with per-song progress events.
+
+### Soft-delete rule for songs in a collection
+`kara:delete` removes the media folder, then:
+- If the song belongs to at least one collection (`songCollectionCount(kid) > 0`): calls `clearSongDownload(kid)` which **NULLs** `media_file` / `media_size` / `lyricless_file` / `downloaded_at` and **keeps the row**, so the song stays in its collections and renders as **"Not Downloaded"**.
+- If the song is in no collection: the row is **hard-deleted**.
 
 ### Settings store
 - **File:** `path.join(app.getPath('userData'), 'settings.json')` — a JSON `AppSettings { separationModel: string }`.
@@ -141,12 +163,35 @@ This file owns everything privileged. Major sections:
 | Channel | Kind | Purpose |
 |---------|------|---------|
 | `kara:search` | `handle` (invoke) | Params `{ query, from, size, mode? }`. `mode`: `text`→`filter`, `year`→`q=y:`, `kid`→`q=k:`. Returns `{ count, rows: SearchRow[] }`. |
-| `kara:catalog` | `handle` | Returns all `CatalogEntry[]`, sorted by `downloadedAt` desc. |
-| `kara:download` | `handle` | Params `kid`. Fetches song detail, downloads `hardsubbed_mediafile` to `<dir>/<name>.mp4` (via a `.part` temp file, then atomic `rename`), sends `kara:download-progress` events during transfer, writes the catalog index, returns the new `CatalogEntry`. |
-| `kara:media-stream` | `on` (send) | Params `kid`. Pipes the local video file to the renderer as `kara:media-data` messages (see §6). |
-| `kara:delete` | `handle` | Params `kid`. Deletes the video file + index entry. |
+| `kara:catalog` | `handle` | Returns **all** songs the app knows about (downloaded and metadata-only) as `CatalogEntry[]`, sorted by `downloadedAt` desc. |
+| `kara:catalog-backfill` | `handle` | Fills in `langs` / `offVocal` for downloaded entries written before those fields existed (metadata-only rows are skipped); persists the results and returns the updated entries. |
+| `kara:download` | `handle` | Params `kid`. Fetches song detail, downloads `hardsubbed_mediafile` to `media/<kid>/<name>.mp4` (via a `.part` temp file, then atomic `rename`), sends `kara:download-progress` events during transfer, upserts the `songs` row, returns the new `CatalogEntry`. |
+| `kara:media-stream` | `on` (send) | Params `kid`, optional `variant` (`'original'` \| `'lyricless'`). Pipes the local video file to the renderer as `kara:media-data` messages (see §6). |
+| `kara:delete` | `handle` | Params `kid`. Deletes the media folder, then — if the song belongs to at least one collection — NULLs the download fields and keeps the row (soft delete, see below); otherwise hard-deletes the row. |
+| `kara:write-lyricless` | `handle` | Params `kid`, `data` (ArrayBuffer). Writes the renderer-produced lyricless MP4 to `media/<kid>/<kid>.lyricless.mp4` and records it on the song row. |
+| `kara:lyricless-status` | `handle` | Params `kid`. Returns `{ exists, file? }` for the lyricless variant. |
 | `kara:settings` | `handle` | Returns the persisted `AppSettings` (see Settings store). |
 | `kara:set-separation-model` | `handle` | Params `model`. Validates against `VALID_MODELS` (throws on unknown id), persists, returns the new `AppSettings`. |
+| `kara:model-status` | `handle` | Params `model`. Reports whether the model's fp16 artifact is cached locally. |
+| `kara:save-model` | `handle` | Params `model`, `data`. Saves a model file to disk after first download. |
+| `kara:login` | `handle` | Params `{ username, password }`. POSTs to `POST /auth/login`, upserts the singleton `account` row, returns `{ username, role }`. |
+| `kara:logout` | `handle` | Clears the `account` row. |
+| `kara:account-status` | `handle` | Returns `{ loggedIn, username?, role? }` — never the token. |
+| `kara:collections-list` | `handle` | Returns all collections with song counts (membership rows and downloaded rows). |
+| `kara:collection-create` | `handle` | Params `name`. Creates a new **local** collection. |
+| `kara:collection-rename` | `handle` | Params `id`, `name`. |
+| `kara:collection-delete` | `handle` | Params `id`. Deletes the collection; membership rows cascade, songs are untouched. |
+| `kara:collection-add-song` | `handle` | Params `collectionId`, `kid`. Local collections only. |
+| `kara:collection-remove-song` | `handle` | Params `collectionId`, `kid`. Local collections only (imported collections are read-only). |
+| `kara:collection-reorder` | `handle` | Params `collectionId`, `orderedKids`. Local collections only. |
+| `kara:collection-songs` | `handle` | Params `collectionId`. Returns the collection's songs in position order (downloaded and not). |
+| `kara:collections-for-song` | `handle` | Params `kid`. Returns the collections a song belongs to. |
+| `kara:playlists-mine` | `handle` | Lists the logged-in user's kara.moe playlists. Discovery only — writes nothing; returns `[]` when logged out. Public route, called **without** an Authorization header. |
+| `kara:collection-import` | `handle` | Params `{ plaid, name?, ownerUsername?, origin? }`. Fetches `GET /api/playlist/{plaid}` (paginated, public, no Authorization header), stores the source plaid + every song's metadata, and creates membership rows for **all** songs in remote order. Downloads **nothing**. Importing an already-imported plaid syncs it instead of duplicating (unique index on `remote_plaid`). |
+| `kara:collection-sync-imported` | `handle` | Params `collectionId`. Re-pulls the playlist, refreshes metadata + membership, bumps `last_synced_at`, clears `remote_stale`. On failure (playlist deleted / made private) marks the collection stale and keeps the local copy. Always an explicit user action — never automatic. |
+| `kara:collection-download-song` | `handle` | Params `collectionId`, `kid`. Downloads one song in the collection (keeps it a member). |
+| `kara:collection-download` | `handle` | Params `collectionId`. Bulk-downloads every song in the collection that is not yet downloaded (concurrency 2, per-song progress events). Uses the collection's existing membership; does **not** re-sync from the network. |
+| `kara:collection-browse-user` | `handle` | Params `{ username, filter?, order?, includeContributions?, refresh? }`. Lists any user's public playlists. Discovery only — no DB writes, no auth (works logged out). Public route, called **without** an Authorization header. |
 
 **Download progress events:** main sends `sender.send('kara:download-progress', { kid, received, total })` as bytes arrive; the renderer listens and updates the overlay.
 
@@ -178,13 +223,38 @@ Exposes `window.kara` with these methods (the **complete** renderer API surface)
 | Method | Returns | Notes |
 |--------|---------|-------|
 | `search({query, from, size, mode?})` | `Promise<{count, rows: SearchRow[]}>` | invoke `kara:search` |
-| `catalog()` | `Promise<CatalogEntry[]>` | invoke `kara:catalog` |
+| `catalog()` | `Promise<CatalogEntry[]>` | invoke `kara:catalog` — all songs (downloaded + metadata-only) |
+| `backfillCatalogMetadata()` | `Promise<CatalogEntry[]>` | invoke `kara:catalog-backfill` |
 | `download(kid)` | `Promise<CatalogEntry>` | invoke `kara:download` (resolves when fully downloaded) |
-| `openMediaStream(kid)` | `Promise<ArrayBuffer>` | **see below** |
+| `openMediaStream(kid, variant?)` | `Promise<ArrayBuffer>` | **see below** |
 | `delete(kid)` | `Promise<boolean>` | invoke `kara:delete` |
+| `writeLyricless(kid, data)` | `Promise<CatalogEntry>` | invoke `kara:write-lyricless` |
+| `lyriclessStatus(kid)` | `Promise<LyriclessStatus>` | invoke `kara:lyricless-status` |
 | `settings()` | `Promise<AppSettings>` | invoke `kara:settings` (current `separationModel`) |
 | `setSeparationModel(model)` | `Promise<AppSettings>` | invoke `kara:set-separation-model` (validated + persisted) |
+| `modelStatus(model)` | `Promise<{cached, size?}>` | invoke `kara:model-status` |
+| `openModelStream(model)` | `Promise<ArrayBuffer>` | streams a cached model file to the renderer |
+| `saveModel(model, data)` | `Promise<void>` | invoke `kara:save-model` |
 | `onDownloadProgress(cb)` | `() => void` (unsubscribe) | listens to `kara:download-progress` |
+| `login({username, password})` | `Promise<{username, role}>` | invoke `kara:login` |
+| `logout()` | `Promise<boolean>` | invoke `kara:logout` |
+| `accountStatus()` | `Promise<{loggedIn, username?, role?}>` | invoke `kara:account-status` |
+| `collectionsList()` | `Promise<CollectionRowWithCount[]>` | invoke `kara:collections-list` |
+| `collectionCreate(name)` | `Promise<CollectionRow>` | invoke `kara:collection-create` |
+| `collectionRename(id, name)` | `Promise<void>` | invoke `kara:collection-rename` |
+| `collectionDelete(id)` | `Promise<boolean>` | invoke `kara:collection-delete` |
+| `collectionAddSong(id, kid)` | `Promise<void>` | invoke `kara:collection-add-song` (local only) |
+| `collectionRemoveSong(id, kid)` | `Promise<void>` | invoke `kara:collection-remove-song` (local only) |
+| `collectionReorder(id, kids)` | `Promise<void>` | invoke `kara:collection-reorder` (local only) |
+| `collectionSongs(id)` | `Promise<CatalogEntry[]>` | invoke `kara:collection-songs` |
+| `collectionsForSong(kid)` | `Promise<{id, name}[]>` | invoke `kara:collections-for-song` |
+| `playlistsMine(opts?)` | `Promise<RemotePlaylist[]>` | invoke `kara:playlists-mine` (discovery only) |
+| `collectionImport(params)` | `Promise<CollectionRow>` | invoke `kara:collection-import` |
+| `collectionSyncImported(id)` | `Promise<{downloadedCount, total, stale}>` | invoke `kara:collection-sync-imported` |
+| `collectionDownloadSong(id, kid)` | `Promise<CatalogEntry>` | invoke `kara:collection-download-song` |
+| `collectionDownload(id)` | `Promise<BulkDownloadSummary>` | invoke `kara:collection-download` (bulk) |
+| `onCollectionDownloadProgress(cb)` | `() => void` (unsubscribe) | listens to `kara:collection-download-progress` |
+| `collectionBrowseUser(opts)` | `Promise<RemotePlaylist[]>` | invoke `kara:collection-browse-user` (discovery only) |
 
 ### How video playback works (the important part)
 The renderer **cannot** load a `file://` URL for the `<video>` element in dev mode (the page is served from the webpack-dev-server HTTP origin, which is not allowed to fetch local files), and Electron's default CSP blocks both `file:` and `blob:` media. So:
@@ -324,6 +394,6 @@ These are **not** part of the app logic but were needed to run in a restricted e
 ### Conventions to follow when extending
 1. New network/FS work → main process IPC handler (`src/index.ts`) + preload method (`src/preload.ts`). Never Node in `.vue`.
 2. Keep the CSP in `applyCsp()` as the single source of truth; if you add a new media scheme, update `media-src` there.
-3. Persisted data lives under `userData/kara-catalog`; keep `catalog.json` the index and videos alongside it.
+3. Persisted data lives under `userData/kara-catalog`; `library.db` (SQLite) is the index and `media/<kid>/` folders hold the videos.
 4. Preserve the vue-loader loading pattern in `webpack.renderer.config.ts` (§9).
 5. Keep the UI minimal (plain CSS, no framework) to match the PoC scope.

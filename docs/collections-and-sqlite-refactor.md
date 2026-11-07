@@ -24,6 +24,8 @@ None of this should break the existing single-song search → download → catal
 
 ## 1. Conceptual model: songs vs. collections
 
+> **SUPERSEDED.** The `remote-own` / `remote-subscribed` model described in this section is **superseded** by [`docs/plans/collection-import-rework/`](./plans/collection-import-rework/00-overview.md). In the shipped model: `collections.source` is `'local' | 'imported'` (not `remote-own`/`remote-subscribed`); an **imported** collection is a local, read-only copy of a kara.moe playlist keyed by `remote_plaid`; `songs` is a **metadata catalog** (one row per song the app knows about, with nullable media columns) rather than a download-only list; and the separate `remote_playlist_items` snapshot table was **dropped** — the ordered snapshot now lives in `collection_songs` plus the `songs` rows. The historical content below is retained for reference.
+
 **Do not model "no collection" as a fake "local" collection, and do not let collections own files.** Keep two independent concerns joined by the one stable key kara.moe already gives us, the song's `kid`:
 
 1. **The song library** — one row per downloaded song, keyed by `kid`. This is pure download/file bookkeeping: do we have the bytes, where, what variants. Exactly what `catalog.json` is today, just moved into SQLite.
@@ -89,6 +91,8 @@ Rationale:
 ---
 
 ## 3. SQLite schema
+
+> **SUPERSEDED.** The schema described in this section (with `remote-own` / `remote-subscribed` in the `collections.source` CHECK, and the `remote_playlist_items` snapshot table) is **superseded** by [`docs/plans/collection-import-rework/`](./plans/collection-import-rework/00-overview.md). In the shipped schema: `collections.source` is `'local' | 'imported'`; `remote_plaid` and `origin` columns were added to `collections`; `songs.media_file` and `songs.downloaded_at` are nullable (metadata catalog); and `remote_playlist_items` was **dropped** — the ordered snapshot now lives in `collection_songs` plus the `songs` rows. The historical content below is retained for reference.
 
 ### 3.1 Driver: `better-sqlite3`
 

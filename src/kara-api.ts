@@ -127,6 +127,37 @@ export interface RemotePlaylist {
 }
 
 /**
+ * Known "Off Vocal" version TID. Mirrored from src/index.ts (OFF_VOCAL_TID) —
+ * duplicated here because importing from src/index.ts would create a cycle.
+ */
+const OFF_VOCAL_TID = "c0cc87b9-55b9-40f0-878a-fbb9e34c151e";
+/**
+ * Display codes for a song's languages, e.g. ["JPN"]. Mirrors
+ * `languageCodes()` in src/index.ts (duplicated to avoid an import cycle).
+ */
+function languageCodes(row: {
+  langs?: { short?: string; name?: string }[];
+}): string[] {
+  return (row.langs ?? [])
+    .map((l) => (l.short || l.name || "").trim().toUpperCase())
+    .filter(Boolean);
+}
+/** Collapse a tag name for comparison: "Off Vocal" -> "offvocal". */
+function normalizeTagName(name?: string | null): string {
+  return (name || "").toLowerCase().replace(/[\s_-]+/g, "");
+}
+/**
+ * True when the song is an off-vocal (instrumental) version. Mirrors
+ * `isOffVocal()` in src/index.ts (duplicated to avoid an import cycle).
+ */
+function isOffVocal(row: {
+  versions?: { tid?: string; name?: string | null }[];
+}): boolean {
+  return (row.versions ?? []).some(
+    (v) => v.tid === OFF_VOCAL_TID || normalizeTagName(v.name) === "offvocal",
+  );
+}
+/**
  * A single song row within a playlist, mapped from the raw API content row.
  */
 export interface RemotePlaylistItem {
@@ -137,6 +168,10 @@ export interface RemotePlaylistItem {
   series: string;
   singer: string;
   duration: number | null;
+  /** Language codes, e.g. ["JPN"] — from row.langs[].short (fallback .name, uppercased). */
+  langs: string[];
+  /** True when the row's `versions` tags include the Off Vocal version. */
+  offVocal: boolean;
   /** JSON.stringify of the raw content row. */
   payload: string;
 }
@@ -376,6 +411,9 @@ export async function getUserPlaylists(
  * - series (series[].name joined with ", ")
  * - singer (singers[].name joined with ", ")
  * - duration (number | null)
+ * - langs (language codes, e.g. ["JPN"] — from row.langs[].short,
+ *   falling back to .name, uppercased)
+ * - offVocal (true when row.versions tags include the Off Vocal version)
  * - payload (JSON.stringify of the raw row)
  *
  * Rows without a kid are skipped. Deduplicated by kid, keeping the first
@@ -461,6 +499,8 @@ export async function getPlaylistContents(
         series,
         singer,
         duration,
+        langs: languageCodes(row),
+        offVocal: isOffVocal(row),
         payload: JSON.stringify(row),
       });
     }

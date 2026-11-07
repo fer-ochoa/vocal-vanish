@@ -2,7 +2,7 @@
   <div class="screen">
     <header class="screen-head">
       <h1>Catalog</h1>
-      <p class="muted">Your locally downloaded hardsubbed songs.</p>
+      <p class="muted">Every song in your library — downloaded or not.</p>
     </header>
 
     <div class="searchbar">
@@ -21,10 +21,12 @@
             <span v-if="entry.offVocal" class="tag tag-offvocal" title="This version is already instrumental">Off Vocal</span>
             <span v-if="entry.duration" class="dur">{{ fmtDuration(entry.duration) }}</span>
             <span v-if="entry.lyriclessFile" class="tag tag-accent">Lyricless</span>
+            <span v-if="!entry.downloaded" class="tag tag-dim">Not Downloaded</span>
           </div>
         </div>
         <div class="row-actions">
           <button
+            v-if="entry.downloaded"
             class="btn"
             :class="playButtonClass(entry)"
             :title="playButtonTitle(entry)"
@@ -33,13 +35,21 @@
             Play
           </button>
           <button
-            v-if="canGenerateLyricless(entry)"
+            v-if="entry.downloaded && canGenerateLyricless(entry)"
             class="btn"
             :disabled="processing !== null"
             title="Generate lyricless version"
             @click="startLyricless(entry)"
           >
             Lyricless
+          </button>
+          <button
+            v-if="!entry.downloaded"
+            class="btn btn-primary"
+            :disabled="downloadingKid !== null"
+            @click="downloadOne(entry.kid)"
+          >
+            {{ downloadingKid === entry.kid ? '…' : 'Download' }}
           </button>
           <!-- Add to collection (feat 04) -->
           <div class="collection-menu" v-if="collections.length">
@@ -117,7 +127,9 @@ const membershipMap = ref<Map<string, Set<string>>>(new Map());
 
 async function loadCollections(): Promise<void> {
   try {
-    collections.value = await window.kara.collectionsList();
+    collections.value = (await window.kara.collectionsList()).filter(
+      (c) => c.source === 'local',
+    );
   } catch {
     collections.value = [];
   }
@@ -170,6 +182,23 @@ async function toggleCollectionMembership(kid: string, collectionId: string): Pr
   }
 }
 
+// --- Single-song download --------------------------------------------------
+const downloadingKid = ref<string | null>(null);
+async function downloadOne(kid: string): Promise<void> {
+  if (downloadingKid.value !== null) return;
+  downloadingKid.value = kid;
+  try {
+    const updated = await window.kara.download(kid);
+    const idx = entries.value.findIndex((e) => e.kid === kid);
+    if (idx !== -1) {
+      entries.value[idx] = updated;
+    }
+  } catch (e) {
+    error.value = (e as Error).message || 'Download failed';
+  } finally {
+    downloadingKid.value = null;
+  }
+}
 // --- Pagination ------------------------------------------------------------
 const PAGE_SIZES = [10, 25, 50, 100, 250];
 const size = ref(25);
@@ -273,10 +302,12 @@ function play(kid: string): void {
 }
 
 async function remove(kid: string): Promise<void> {
-  if (!window.confirm('Delete this song from your catalog?')) return;
+  if (!window.confirm('Remove this song from your library?')) return;
   try {
     await window.kara.delete(kid);
-    entries.value = entries.value.filter((e) => e.kid !== kid);
+    // Soft delete keeps the row when the song belongs to a collection, so
+    // reload from the catalog instead of filtering locally.
+    await load();
   } catch (e) {
     error.value = (e as Error).message || 'Delete failed';
   }
