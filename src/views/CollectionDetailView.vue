@@ -13,7 +13,7 @@
       <button
         v-if="isImported"
         class="btn btn-primary"
-        :disabled="bulkBusy || missingCount === 0"
+        :disabled="bulkBusy || processBusy || missingCount === 0"
         @click="downloadAllMissing"
       >
         Download all missing ({{ missingCount }})
@@ -25,6 +25,14 @@
         @click="syncNow"
       >
         {{ syncing ? 'Syncing…' : 'Sync' }}
+      </button>
+      <button
+        class="btn"
+        :disabled="processBusy || bulkBusy || downloadingKid !== null || processableCount === 0"
+        :title="processButtonTitle"
+        @click="processAll"
+      >
+        Process all ({{ processableCount }})
       </button>
     </header>
     <!-- Stale banner -->
@@ -91,6 +99,7 @@
             <span v-if="entry.series" class="tag">{{ entry.series }}</span>
             <span v-if="entry.singer" class="tag tag-dim">{{ entry.singer }}</span>
             <span v-if="entry.duration != null" class="dur">{{ fmtDuration(entry.duration) }}</span>
+            <span v-if="entry.lyriclessFile" class="tag tag-accent">Lyricless</span>
           </div>
         </div>
         <div class="row-actions">
@@ -158,6 +167,40 @@
         </div>
       </div>
     </transition>
+    <!-- Bulk processing (lyricless) progress overlay -->
+    <transition name="fade">
+      <div v-if="processBusy || processSummary" class="overlay">
+        <div class="dialog">
+          <h2 v-if="processBusy">Processing {{ processDone }} / {{ processTotal }}</h2>
+          <h2 v-else>Processing complete</h2>
+          <template v-if="processBusy">
+            <p class="muted small">{{ processCurrentTitle || 'Starting…' }}</p>
+            <div class="bar"><div class="bar-fill" :style="{ width: processPct + '%' }" /></div>
+            <p class="small muted">{{ processLabel }}</p>
+            <p class="muted small">{{ processDone }} of {{ processTotal }} done</p>
+          </template>
+          <template v-else>
+            <p class="muted">
+              {{ processSummary.processed }} processed, {{ processSummary.skipped }} skipped, {{ processSummary.failed.length }} failed
+            </p>
+            <ul v-if="processSummary.failed.length" class="list bulk-failed">
+              <li v-for="f in processSummary.failed" :key="f.kid" class="row">
+                <div class="row-main">
+                  <div class="row-title">{{ bulkTitle(f.kid) }}</div>
+                  <div class="row-sub">
+                    <span class="muted small">{{ f.kid }}</span>
+                  </div>
+                </div>
+                <div class="row-actions">
+                  <span class="muted small">{{ f.error }}</span>
+                </div>
+              </li>
+            </ul>
+            <button class="btn btn-primary" @click="closeProcessSummary">Close</button>
+          </template>
+        </div>
+      </div>
+    </transition>
     <!-- Error toast -->
     <transition name="fade">
       <div v-if="error" class="toast">{{ error }}</div>
@@ -167,6 +210,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import { processSongLyricless, pipelineOverallPct } from '../lyricless/processSong';
 const route = useRoute();
 const router = useRouter();
 const collectionId = route.params.id as string;
@@ -286,7 +330,7 @@ function bulkLabel(item: { received: number; total: number | null }): string {
   return `${Math.round((item.received / item.total) * 100)}%`;
 }
 async function downloadAllMissing(): Promise<void> {
-  if (bulkBusy.value || missingCount.value === 0) return;
+  if (bulkBusy.value || processBusy.value || missingCount.value === 0) return;
   bulkBusy.value = true;
   bulkSummary.value = null;
   bulkTotal.value = 0;
@@ -325,6 +369,77 @@ async function downloadAllMissing(): Promise<void> {
 }
 function closeBulkSummary(): void {
   bulkSummary.value = null;
+}
+// --- Bulk processing (lyricless) -------------------------------------------
+// Stem separation runs in the renderer (WebGPU/WASM), so this loop lives here
+// rather than in the main process like the bulk download. Songs are processed
+// strictly one at a time: a single ONNX session is GPU-bound, and running two
+// separations concurrently would only thrash memory.
+const processBusy = ref(false);
+const processTotal = ref(0);
+const processDone = ref(0);
+const processCurrentTitle = ref('');
+const processLabel = ref('');
+const processPct = ref(0);
+const processSummary = ref<{ processed: number; skipped: number; failed: { kid: string; error: string }[] } | null>(null);
+
+// Only downloaded songs that are not already instrumental and have no
+// lyricless variant yet are worth processing.
+const processableCount = computed(
+  () => songs.value.filter((s: any) => s.downloaded && !s.offVocal && !s.lyriclessFile).length,
+);
+const processButtonTitle = computed(() =>
+  processableCount.value === 0
+    ? 'Nothing to process: only downloaded songs that are not off-vocal and have no lyricless version yet are processed'
+    : 'Generate a lyricless version for every downloaded, non-off-vocal song that has none yet',
+);
+
+async function processAll(): Promise<void> {
+  if (processBusy.value || bulkBusy.value || downloadingKid.value !== null) return;
+  const targets = songs.value.filter((s: any) => s.downloaded && !s.offVocal && !s.lyriclessFile);
+  if (!targets.length) return;
+  const skipped = songs.value.length - targets.length;
+  processBusy.value = true;
+  processSummary.value = null;
+  processTotal.value = targets.length;
+  processDone.value = 0;
+  processCurrentTitle.value = '';
+  processLabel.value = '';
+  processPct.value = 0;
+  error.value = '';
+  const failed: { kid: string; error: string }[] = [];
+  let processed = 0;
+  try {
+    for (const entry of targets) {
+      processCurrentTitle.value = entry.title;
+      processLabel.value = 'Starting…';
+      processPct.value = 0;
+      try {
+        const result = await processSongLyricless(entry.kid, (p) => {
+          processLabel.value = p.label;
+          processPct.value = pipelineOverallPct(p);
+        });
+        const idx = songs.value.findIndex((s: any) => s.kid === entry.kid);
+        if (idx !== -1) {
+          songs.value[idx] = { ...songs.value[idx], lyriclessFile: result.lyriclessFile };
+        }
+        processed++;
+      } catch (e) {
+        // One bad song must never abort the batch.
+        failed.push({ kid: entry.kid, error: (e as Error).message || 'Processing failed' });
+      }
+      processDone.value++;
+    }
+    processSummary.value = { processed, skipped, failed };
+    await load();
+  } finally {
+    processBusy.value = false;
+    processCurrentTitle.value = '';
+  }
+}
+
+function closeProcessSummary(): void {
+  processSummary.value = null;
 }
 // --- Sync imported collection ----------------------------------------------
 async function syncNow(): Promise<void> {

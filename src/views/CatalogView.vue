@@ -112,7 +112,7 @@
 import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import PagedList from '../components/PagedList.vue';
-import { generateLyricless } from '../lyricless/pipeline';
+import { processSongLyricless, pipelineOverallPct } from '../lyricless/processSong';
 
 const router = useRouter();
 const entries = ref<any[]>([]);
@@ -292,25 +292,13 @@ async function startLyricless(entry: any): Promise<void> {
   error.value = '';
 
   try {
-    // Stream the original video bytes from the main process.
-    const buf = await window.kara.openMediaStream(entry.kid);
-
-    // Run the full pipeline: decode → separate → re-mux.
-    const lyriclessBytes = await generateLyricless(buf, (p) => {
+    const result = await processSongLyricless(entry.kid, (p) => {
       processLabel.value = p.label;
-      // Map stage fractions to an overall 0-100% range.
-      const stageWeight = p.stage === 'decode' ? 0.1 : p.stage === 'separate' ? 0.7 : 0.2;
-      const stageStart = p.stage === 'decode' ? 0 : p.stage === 'separate' ? 10 : 80;
-      processPct.value = Math.round(stageStart + p.fraction * stageWeight * 100);
+      processPct.value = pipelineOverallPct(p);
     });
-
-    // Write the result to disk via IPC.
-    await window.kara.writeLyricless(entry.kid, lyriclessBytes);
-
-    // Update the local entry.
     const idx = entries.value.findIndex((e) => e.kid === entry.kid);
     if (idx !== -1) {
-      entries.value[idx] = { ...entries.value[idx], lyriclessFile: `${entry.kid}.lyricless.mp4` };
+      entries.value[idx] = { ...entries.value[idx], lyriclessFile: result.lyriclessFile };
     }
   } catch (e) {
     error.value = (e as Error).message || 'Lyricless generation failed';
