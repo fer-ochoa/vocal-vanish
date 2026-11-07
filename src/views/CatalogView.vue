@@ -10,84 +10,84 @@
       <span class="muted small">{{ shown.length }} song{{ shown.length === 1 ? '' : 's' }}</span>
     </div>
 
-    <ul v-if="shown.length" class="list">
-      <li v-for="entry in paged" :key="entry.kid" class="row">
-        <div class="row-main">
-          <div class="row-title">{{ entry.title }}</div>
-          <div class="row-sub">
-            <span v-if="entry.series" class="tag">{{ entry.series }}</span>
-            <span v-if="entry.singer" class="tag tag-dim">{{ entry.singer }}</span>
-            <span v-for="lang in entry.langs || []" :key="lang" class="tag tag-lang" title="Song language">{{ lang }}</span>
-            <span v-if="entry.offVocal" class="tag tag-offvocal" title="This version is already instrumental">Off Vocal</span>
-            <span v-if="entry.duration" class="dur">{{ fmtDuration(entry.duration) }}</span>
-            <span v-if="entry.lyriclessFile" class="tag tag-accent">Lyricless</span>
-            <span v-if="!entry.downloaded" class="tag tag-dim">Not Downloaded</span>
-          </div>
-        </div>
-        <div class="row-actions">
-          <button
-            v-if="entry.downloaded"
-            class="btn"
-            :class="playButtonClass(entry)"
-            :title="playButtonTitle(entry)"
-            @click="play(entry.kid)"
-          >
-            Play
-          </button>
-          <button
-            v-if="entry.downloaded && canGenerateLyricless(entry)"
-            class="btn"
-            :disabled="processing !== null"
-            title="Generate lyricless version"
-            @click="startLyricless(entry)"
-          >
-            Lyricless
-          </button>
-          <button
-            v-if="!entry.downloaded"
-            class="btn btn-primary"
-            :disabled="downloadingKid !== null"
-            @click="downloadOne(entry.kid)"
-          >
-            {{ downloadingKid === entry.kid ? '…' : 'Download' }}
-          </button>
-          <!-- Add to collection (feat 04) -->
-          <div class="collection-menu" v-if="collections.length">
-            <button class="btn btn-ghost" title="Add to collection" @click="toggleCollectionMenu(entry.kid)">
-              📁
-            </button>
-            <div v-if="openCollectionMenu === entry.kid" class="collection-dropdown">
-              <div class="collection-dropdown-title">Collections</div>
-              <label
-                v-for="col in collections"
-                :key="col.id"
-                class="collection-dropdown-item"
-              >
-                <input
-                  type="checkbox"
-                  :checked="isInCollection(entry.kid, col.id)"
-                  @change="toggleCollectionMembership(entry.kid, col.id)"
-                />
-                <span>{{ col.name }}</span>
-              </label>
+    <PagedList
+      v-if="shown.length"
+      :items="shown"
+      :sizes="PAGE_SIZES"
+      :reset-key="filter"
+      class="list-section--grow"
+      v-slot="{ paged }"
+    >
+      <ul class="list">
+        <li v-for="entry in paged" :key="entry.kid" class="row">
+          <div class="row-main">
+            <div class="row-title">{{ entry.title }}</div>
+            <div class="row-sub">
+              <span v-if="entry.series" class="tag">{{ entry.series }}</span>
+              <span v-if="entry.singer" class="tag tag-dim">{{ entry.singer }}</span>
+              <span v-for="lang in entry.langs || []" :key="lang" class="tag tag-lang" title="Song language">{{ lang }}</span>
+              <span v-if="entry.offVocal" class="tag tag-offvocal" title="This version is already instrumental">Off Vocal</span>
+              <span v-if="entry.duration" class="dur">{{ fmtDuration(entry.duration) }}</span>
+              <span v-if="entry.lyriclessFile" class="tag tag-accent">Lyricless</span>
+              <span v-if="!entry.downloaded" class="tag tag-dim">Not Downloaded</span>
             </div>
           </div>
-          <button class="btn btn-ghost" title="Delete" @click="remove(entry.kid)">✕</button>
-        </div>
-      </li>
-    </ul>
+          <div class="row-actions">
+            <button
+              v-if="entry.downloaded"
+              class="btn"
+              :class="playButtonClass(entry)"
+              :title="playButtonTitle(entry)"
+              @click="play(entry.kid)"
+            >
+              Play
+            </button>
+            <button
+              v-if="entry.downloaded && canGenerateLyricless(entry)"
+              class="btn"
+              :disabled="processing !== null"
+              title="Generate lyricless version"
+              @click="startLyricless(entry)"
+            >
+              Lyricless
+            </button>
+            <button
+              v-if="!entry.downloaded"
+              class="btn btn-primary"
+              :disabled="downloadingKid !== null"
+              @click="downloadOne(entry.kid)"
+            >
+              {{ downloadingKid === entry.kid ? '…' : 'Download' }}
+            </button>
+            <!-- Add to collection (feat 04) -->
+            <div class="collection-menu" v-if="collections.length">
+              <button class="btn btn-ghost" title="Add to collection" @click="toggleCollectionMenu(entry.kid)">
+                📁
+              </button>
+              <div v-if="openCollectionMenu === entry.kid" class="collection-dropdown">
+                <div class="collection-dropdown-title">Collections</div>
+                <label
+                  v-for="col in collections"
+                  :key="col.id"
+                  class="collection-dropdown-item"
+                >
+                  <input
+                    type="checkbox"
+                    :checked="isInCollection(entry.kid, col.id)"
+                    @change="toggleCollectionMembership(entry.kid, col.id)"
+                  />
+                  <span>{{ col.name }}</span>
+                </label>
+              </div>
+            </div>
+            <button class="btn btn-ghost" title="Delete" @click="remove(entry.kid)">✕</button>
+          </div>
+        </li>
+      </ul>
+    </PagedList>
     <p v-else-if="loaded" class="muted">Nothing here yet. Download some songs from the Search screen.</p>
 
-    <!-- Footer: page size + page navigation -->
-    <ListFooter
-      v-if="shown.length"
-      :sizes="PAGE_SIZES"
-      :size="size"
-      :total="shown.length"
-      :page="page"
-      @update:size="changeSize"
-      @update:page="goPage"
-    />
+
 
     <!-- Lyricless progress overlay -->
     <transition name="fade">
@@ -109,9 +109,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
-import ListFooter from '../components/ListFooter.vue';
+import PagedList from '../components/PagedList.vue';
 import { generateLyricless } from '../lyricless/pipeline';
 
 const router = useRouter();
@@ -201,8 +201,6 @@ async function downloadOne(kid: string): Promise<void> {
 }
 // --- Pagination ------------------------------------------------------------
 const PAGE_SIZES = [10, 25, 50, 100, 250];
-const size = ref(25);
-const page = ref(1); // 1-based
 
 // --- Lyricless generation state -------------------------------------------
 const processing = ref<string | null>(null); // kid being processed, or null
@@ -268,34 +266,6 @@ const shown = computed(() => {
   );
 });
 
-const totalPages = computed(() => Math.max(1, Math.ceil(shown.value.length / size.value)));
-
-// The slice of the filtered list rendered on the current page.
-const paged = computed(() => {
-  const start = (page.value - 1) * size.value;
-  return shown.value.slice(start, start + size.value);
-});
-
-function goPage(target: number): void {
-  page.value = Math.min(Math.max(1, target), totalPages.value);
-}
-
-// Changing the page size keeps the first row you were looking at, snapped to
-// the new page grid and clamped to the last page.
-function changeSize(next: number): void {
-  const firstVisible = (page.value - 1) * size.value;
-  size.value = next;
-  page.value = Math.min(Math.floor(firstVisible / next) + 1, totalPages.value);
-}
-
-// A new filter starts from the first page; deleting rows (or shrinking the
-// page size) can leave the current page past the end, so pull it back.
-watch(filter, () => {
-  page.value = 1;
-});
-watch([() => shown.value.length, size], () => {
-  if (page.value > totalPages.value) page.value = totalPages.value;
-});
 
 function play(kid: string): void {
   router.push({ name: 'player', params: { kid } });

@@ -301,12 +301,75 @@ body {
 }
 
 /* --- List footer (page size + pagination) --------------------------------- */
-/* Pinned to the bottom of the scrolling content area so the page controls are
-   always reachable, and stretched edge-to-edge across the content padding. */
+/* Every paged list (catalog, search, collection tabs) renders its rows and a
+   <ListFooter> inside a .list-section. The section is a flex column so the
+   footer can be pushed to the bottom edge when the rows do not fill the view,
+   and stays pinned there (sticky) while a long list scrolls. */
+.list-section {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-height: 0;
+}
+
+/* The section that absorbs the leftover height of the screen. */
+.list-section--grow {
+  flex: 1 1 auto;
+}
+
+/* A screen that contains a footer becomes a full-height flex column so its
+   last list section can grow and the footer lands flush with the bottom edge
+   instead of floating right under the last row. */
+.screen:has(.list-footer) {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+/* Collection tabs: the panel is the growing child of the screen. */
+.screen:has(.list-footer) > .coll-panel {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Public tab: the browse <details> holds the growing list, so it has to be a
+   flex column itself. `display: list-item` on the summary keeps the marker. */
+.coll-panel > .browse-panel[open] {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+/* Chromium 131+ wraps a <details>'s children in a ::details-content box, which
+   would become the only flex item and stop the inner list from growing.
+   `display: contents` dissolves that box so the list is a real flex child.
+   Browsers without ::details-content simply ignore this rule. */
+.coll-panel > .browse-panel[open]::details-content {
+  display: contents;
+}
+/* Belt-and-braces: make the growing section fill the details even if
+   ::details-content is unsupported. */
+.coll-panel > .browse-panel[open] > .list-section--grow {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.coll-panel > .browse-panel:not([open]) {
+  flex: 0 0 auto;
+}
+
+.coll-panel > .browse-panel > summary {
+  flex: 0 0 auto;
+  display: list-item;
+}
+
 .list-footer {
   position: sticky;
   bottom: 0;
   z-index: 10;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -316,6 +379,12 @@ body {
   padding: 12px 30px;
   background: var(--panel);
   border-top: 1px solid var(--border);
+}
+
+/* Inside a paged section the footer is pushed to the bottom edge when the rows
+   are shorter than the view; the section's gap keeps the separation. */
+.list-section > .list-footer {
+  margin-top: auto;
 }
 
 /* Drop the content bottom padding under a footer so it sits flush with the

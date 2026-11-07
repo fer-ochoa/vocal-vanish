@@ -1,34 +1,40 @@
 <template>
-  <div class="public-collections-panel">
+  <div class="public-collections-panel coll-panel">
     <!-- Imported from public playlists -->
     <h2 style="font-size: 15px; margin: 0 0 10px;">Imported from public playlists</h2>
-    <ul v-if="importedCollections.length" class="list">
-      <li
-        v-for="col in importedCollections"
-        :key="col.id"
-        class="row"
-        @click="emit('open', col.id)"
-      >
-        <div class="row-main">
-          <div class="row-title">{{ col.name }}</div>
-          <div class="row-sub">
-            <span v-if="col.ownerUsername" class="muted small">by {{ col.ownerUsername }}</span>
-            <span class="muted small">{{ col.songCount }} of {{ col.remoteItemCount ?? col.songCount }} downloaded</span>
-            <span v-if="col.lastSyncedAt" class="muted small">{{ syncedAgo(col.lastSyncedAt) }}</span>
-            <span v-if="col.remoteStale === true" class="tag tag-dim">no longer public</span>
+    <PagedList
+      v-if="importedCollections.length"
+      :items="importedCollections"
+      v-slot="{ paged }"
+    >
+      <ul class="list">
+        <li
+          v-for="col in paged"
+          :key="col.id"
+          class="row"
+          @click="emit('open', col.id)"
+        >
+          <div class="row-main">
+            <div class="row-title">{{ col.name }}</div>
+            <div class="row-sub">
+              <span v-if="col.ownerUsername" class="muted small">by {{ col.ownerUsername }}</span>
+              <span class="muted small">{{ col.songCount }} of {{ col.remoteItemCount ?? col.songCount }} downloaded</span>
+              <span v-if="col.lastSyncedAt" class="muted small">{{ syncedAgo(col.lastSyncedAt) }}</span>
+              <span v-if="col.remoteStale === true" class="tag tag-dim">no longer public</span>
+            </div>
           </div>
-        </div>
-        <div class="row-actions">
-          <button
-            class="btn btn-ghost"
-            title="Delete"
-            @click.stop="emit('remove', col.id, col.name)"
-          >
-            ✕
-          </button>
-        </div>
-      </li>
-    </ul>
+          <div class="row-actions">
+            <button
+              class="btn btn-ghost"
+              title="Delete"
+              @click.stop="emit('remove', col.id, col.name)"
+            >
+              ✕
+            </button>
+          </div>
+        </li>
+      </ul>
+    </PagedList>
     <p v-else class="muted">No public playlists imported yet — browse a kara.moe user below.</p>
     <!-- Browse a kara.moe user (feat 08) — public data, works logged out -->
     <details class="browse-panel" open>
@@ -71,34 +77,43 @@
       <div v-else-if="hasBrowsed && !browseResults.length" class="muted small browse-state">
         No public playlists for {{ browseUsername }}.
       </div>
-      <ul v-else-if="browseResults.length" class="list browse-list">
-        <li v-for="pl in browseResults" :key="pl.plaid" class="row">
-          <div class="row-main">
-            <div class="row-title">{{ pl.name }}</div>
-            <div class="row-sub">
-              <span class="muted small">{{ pl.karacount ?? 0 }} songs</span>
-              <span v-if="pl.duration != null" class="dur">{{ fmtBrowseDuration(pl.duration) }}</span>
-              <span class="muted small">by {{ pl.nickname || pl.username || 'unknown' }}</span>
-              <span v-if="isSharedBy(pl)" class="tag tag-dim">shared by {{ pl.username }}</span>
-            </div>
-          </div>
-          <div class="row-actions">
-            <button
-              class="btn btn-ghost"
-              :disabled="isImported(pl) || importingPlaid === pl.plaid"
-              @click.stop="importPlaylist(pl)"
-            >
-              {{ importingPlaid === pl.plaid ? '…' : isImported(pl) ? 'Imported ✓' : 'Import' }}
-            </button>
-            <span v-if="importError[pl.plaid]" class="browse-row-error">{{ importError[pl.plaid] }}</span>
-          </div>
-        </li>
-      </ul>
+        <PagedList
+          v-else-if="browseResults.length"
+          :items="browseResults"
+          :reset-key="`${browseFilter}|${browseOrder}|${browseIncludeContributions}`"
+          class="list-section--grow browse-list"
+          v-slot="{ paged }"
+        >
+          <ul class="list">
+            <li v-for="pl in paged" :key="pl.plaid" class="row">
+              <div class="row-main">
+                <div class="row-title">{{ pl.name }}</div>
+                <div class="row-sub">
+                  <span class="muted small">{{ pl.karacount ?? 0 }} songs</span>
+                  <span v-if="pl.duration != null" class="dur">{{ fmtBrowseDuration(pl.duration) }}</span>
+                  <span class="muted small">by {{ pl.nickname || pl.username || 'unknown' }}</span>
+                  <span v-if="isSharedBy(pl)" class="tag tag-dim">shared by {{ pl.username }}</span>
+                </div>
+              </div>
+              <div class="row-actions">
+                <button
+                  class="btn btn-ghost"
+                  :disabled="isImported(pl) || importingPlaid === pl.plaid"
+                  @click.stop="importPlaylist(pl)"
+                >
+                  {{ importingPlaid === pl.plaid ? '…' : isImported(pl) ? 'Imported ✓' : 'Import' }}
+                </button>
+                <span v-if="importError[pl.plaid]" class="browse-row-error">{{ importError[pl.plaid] }}</span>
+              </div>
+            </li>
+          </ul>
+        </PagedList>
     </details>
   </div>
 </template>
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
+import PagedList from '../PagedList.vue';
 import type { RemotePlaylist, PlaylistOrder } from '../../preload';
 
 const props = defineProps<{
@@ -209,9 +224,6 @@ function syncedAgo(iso: string | null): string {
 void props;
 </script>
 <style scoped>
-.public-collections-panel {
-  display: block;
-}
 .browse-panel {
   background: var(--panel);
   border: 1px solid var(--border);

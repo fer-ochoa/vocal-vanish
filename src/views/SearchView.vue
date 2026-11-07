@@ -25,42 +25,41 @@
     <div v-if="searched" class="results">
       <p class="muted small">{{ count }} result{{ count === 1 ? '' : 's' }}</p>
 
-      <ul v-if="rows.length" class="list">
-        <li v-for="row in rows" :key="row.kid" class="row">
-          <div class="row-main">
-            <div class="row-title">{{ row.title }}</div>
-            <div class="row-sub">
-              <span v-if="row.series" class="tag">{{ row.series }}</span>
-              <span v-if="row.singer" class="tag tag-dim">{{ row.singer }}</span>
-              <span v-for="lang in row.langs || []" :key="lang" class="tag tag-lang" title="Song language">{{ lang }}</span>
-              <span v-if="row.offVocal" class="tag tag-offvocal" title="This version is already instrumental">Off Vocal</span>
-              <span v-if="row.duration" class="dur">{{ fmtDuration(row.duration) }}</span>
+      <div v-if="rows.length" class="list-section list-section--grow">
+        <ul class="list">
+          <li v-for="row in rows" :key="row.kid" class="row">
+            <div class="row-main">
+              <div class="row-title">{{ row.title }}</div>
+              <div class="row-sub">
+                <span v-if="row.series" class="tag">{{ row.series }}</span>
+                <span v-if="row.singer" class="tag tag-dim">{{ row.singer }}</span>
+                <span v-for="lang in row.langs || []" :key="lang" class="tag tag-lang" title="Song language">{{ lang }}</span>
+                <span v-if="row.offVocal" class="tag tag-offvocal" title="This version is already instrumental">Off Vocal</span>
+                <span v-if="row.duration" class="dur">{{ fmtDuration(row.duration) }}</span>
+              </div>
             </div>
-          </div>
-          <button
-            class="btn"
-            :class="row.downloaded ? 'btn-downloaded' : 'btn-primary'"
-            :disabled="row.downloaded"
-            :title="row.downloaded ? 'Already in your catalog' : 'Download this song'"
-            @click="startDownload(row.kid)"
-          >
-            {{ row.downloaded ? 'Downloaded' : 'Download' }}
-          </button>
-        </li>
-      </ul>
+            <button
+              class="btn"
+              :class="row.downloaded ? 'btn-downloaded' : 'btn-primary'"
+              :disabled="row.downloaded"
+              :title="row.downloaded ? 'Already in your catalog' : 'Download this song'"
+              @click="startDownload(row.kid)"
+            >
+              {{ row.downloaded ? 'Downloaded' : 'Download' }}
+            </button>
+          </li>
+        </ul>
+        <ListFooter
+          :sizes="PAGE_SIZES"
+          :size="size"
+          :total="count"
+          :page="page"
+          :disabled="loading"
+          @update:size="changeSize"
+          @update:page="goPage"
+        />
+      </div>
       <p v-else class="muted">No songs found.</p>
-
-      <!-- Footer: page size + page navigation -->
-      <ListFooter
-        v-if="rows.length"
-        :sizes="PAGE_SIZES"
-        :size="size"
-        :total="count"
-        :page="page"
-        :disabled="loading"
-        @update:size="changeSize"
-        @update:page="goPage"
-      />
     </div>
 
     <!-- Download progress overlay -->
@@ -210,3 +209,13 @@ function fmtBytes(n: number | null): string {
 
 onBeforeUnmount(() => offProgress?.());
 </script>
+<style scoped>
+/* The results block is the growing child of the screen so the paged section
+   inside it can push the footer to the bottom edge. */
+.results {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+</style>
