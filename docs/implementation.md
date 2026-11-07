@@ -149,6 +149,12 @@ Three distinct, explicit user actions — never automatic:
 - If the song belongs to at least one collection (`songCollectionCount(kid) > 0`): calls `clearSongDownload(kid)` which **NULLs** `media_file` / `media_size` / `lyricless_file` / `downloaded_at` and **keeps the row**, so the song stays in its collections and renders as **"Not Downloaded"**.
 - If the song is in no collection: the row is **hard-deleted**.
 
+### Orphan cleanup when an imported collection is deleted
+
+Deleting an **imported** collection also garbage-collects the catalog rows that only existed because of it. For every song that was a member of the deleted collection, `deleteOrphanUndownloadedSongs` keeps the row when it is downloaded (`media_file IS NOT NULL`) or when it is still a member of another collection, and deletes it otherwise. This is the counterpart of the soft-delete rule above: a song that lost its download but kept its membership becomes a true orphan once that last membership goes away.
+
+Local collections never trigger this — their songs are user-curated and are always kept.
+
 ### Settings store
 - **File:** `path.join(app.getPath('userData'), 'settings.json')` — a JSON `AppSettings { separationModel: string }`.
 - Helpers: `readSettings()` (falls back to `DEFAULT_SEPARATION_MODEL = 'htdemucs'` when the file is missing/corrupt or the id is not in `VALID_MODELS`), `writeSettings()`, `assertValidModel()` (also guards the model id used in cache filenames).
@@ -180,7 +186,7 @@ Three distinct, explicit user actions — never automatic:
 | `kara:collections-list` | `handle` | Returns all collections with song counts (membership rows and downloaded rows). |
 | `kara:collection-create` | `handle` | Params `name`. Creates a new **local** collection. |
 | `kara:collection-rename` | `handle` | Params `id`, `name`. |
-| `kara:collection-delete` | `handle` | Params `id`. Deletes the collection; membership rows cascade, songs are untouched. |
+| `kara:collection-delete` | `handle` | Params `id`. Deletes the collection (membership rows cascade). For an **imported** collection it also deletes the catalog rows of its songs that are not downloaded and belong to no other collection. Returns `{ deletedSongs: string[] }`. |
 | `kara:collection-add-song` | `handle` | Params `collectionId`, `kid`. Local collections only. |
 | `kara:collection-remove-song` | `handle` | Params `collectionId`, `kid`. Local collections only (imported collections are read-only). |
 | `kara:collection-reorder` | `handle` | Params `collectionId`, `orderedKids`. Local collections only. |
@@ -242,7 +248,7 @@ Exposes `window.kara` with these methods (the **complete** renderer API surface)
 | `collectionsList()` | `Promise<CollectionRowWithCount[]>` | invoke `kara:collections-list` |
 | `collectionCreate(name)` | `Promise<CollectionRow>` | invoke `kara:collection-create` |
 | `collectionRename(id, name)` | `Promise<void>` | invoke `kara:collection-rename` |
-| `collectionDelete(id)` | `Promise<boolean>` | invoke `kara:collection-delete` |
+| `collectionDelete(id)` | `Promise<{ deletedSongs: string[] }>` | invoke `kara:collection-delete` |
 | `collectionAddSong(id, kid)` | `Promise<void>` | invoke `kara:collection-add-song` (local only) |
 | `collectionRemoveSong(id, kid)` | `Promise<void>` | invoke `kara:collection-remove-song` (local only) |
 | `collectionReorder(id, kids)` | `Promise<void>` | invoke `kara:collection-reorder` (local only) |

@@ -449,6 +449,9 @@ body {
   z-index: 200;
   max-width: 60%;
 }
+.toast-ok {
+  background: #2f7d4f;
+}
 
 /* --- Player ---------------------------------------------------------------- */
 .player-screen {

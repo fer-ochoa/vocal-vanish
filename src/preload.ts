@@ -286,8 +286,13 @@ const api = {
   collectionRename(id: string, name: string): Promise<void> {
     return ipcRenderer.invoke('kara:collection-rename', id, name);
   },
-  /** Delete a collection (membership rows cascade; songs are untouched). */
-  collectionDelete(id: string): Promise<boolean> {
+  /**
+   * Delete a collection. Membership rows cascade. Deleting an IMPORTED
+   * collection also removes the catalog rows of its songs that are not
+   * downloaded and belong to no other collection; `deletedSongs` lists the
+   * kids that were removed (empty for local collections).
+   */
+  collectionDelete(id: string): Promise<{ deletedSongs: string[] }> {
     return ipcRenderer.invoke('kara:collection-delete', id);
   },
   /** Add a song to a collection. */

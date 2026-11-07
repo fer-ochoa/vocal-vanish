@@ -59,6 +59,9 @@
     <transition name="fade">
       <div v-if="error" class="toast">{{ error }}</div>
     </transition>
+    <transition name="fade">
+      <div v-if="notice" class="toast toast-ok">{{ notice }}</div>
+    </transition>
   </div>
 </template>
 <script setup lang="ts">
@@ -75,6 +78,7 @@ const router = useRouter();
 const collections = ref<any[]>([]);
 const loaded = ref(false);
 const error = ref('');
+const notice = ref('');
 const loggedIn = ref(false);
 const username = ref('');
 
@@ -104,9 +108,19 @@ function showError(message: string): void {
 }
 
 async function remove(id: string, name: string): Promise<void> {
-  if (!window.confirm(`Delete collection "${name}"? Its songs will not be deleted.`)) return;
+  const col = collections.value.find((c: any) => c.id === id);
+  const imported = col?.source === 'imported';
+  const message = imported
+    ? `Delete collection "${name}"? Songs that are not downloaded and are in no other collection will be removed from the catalog.`
+    : `Delete collection "${name}"? Its songs will not be deleted.`;
+  if (!window.confirm(message)) return;
   try {
-    await window.kara.collectionDelete(id);
+    const res = await window.kara.collectionDelete(id);
+    const n = res?.deletedSongs?.length ?? 0;
+    if (n > 0) {
+      notice.value = `Removed ${n} undownloaded song${n === 1 ? '' : 's'} from the catalog.`;
+      window.setTimeout(() => { notice.value = ''; }, 4000);
+    }
     await load();
   } catch (e) {
     error.value = (e as Error).message || 'Failed to delete collection';

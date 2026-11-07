@@ -407,9 +407,58 @@ export function renameCollection(id: string, name: string): void {
     .run();
 }
 
-/** Delete a collection. `ON DELETE CASCADE` removes `collection_songs` rows. */
-export function deleteCollection(id: string): void {
+/**
+ * Delete catalog rows for songs that are NOT downloaded (media_file IS NULL)
+ * and are no longer a member of ANY collection. A song is deleted only when
+ * both conditions hold; downloaded songs and songs still referenced by
+ * another collection are always kept. Returns the kids whose `songs` row
+ * was removed.
+ */
+export function deleteOrphanUndownloadedSongs(kids: string[]): string[] {
+  const unique = [...new Set(kids)];
+  if (!unique.length) return [];
+  const deleted: string[] = [];
+  db.transaction((tx) => {
+    for (const kid of unique) {
+      const row = tx
+        .select({ kid: songs.kid })
+        .from(songs)
+        .where(and(eq(songs.kid, kid), sql`${songs.mediaFile} IS NULL`))
+        .get();
+      if (!row) continue; // unknown kid, or the song IS downloaded
+      const count = tx
+        .select({ n: sql<number>`count(*)` })
+        .from(collectionSongs)
+        .where(eq(collectionSongs.kid, kid))
+        .get();
+      if ((count?.n ?? 0) > 0) continue; // still in another collection
+      tx.delete(songs).where(eq(songs.kid, kid)).run();
+      deleted.push(kid);
+    }
+  });
+  return deleted;
+}
+/**
+ * Delete a collection. `ON DELETE CASCADE` removes `collection_songs` rows.
+ * Deleting an imported collection also garbage-collects songs that only
+ * existed because of it: any member song that is not downloaded and is no
+ * longer a member of any other collection has its `songs` row removed.
+ * Downloaded songs and songs still used by another collection are always
+ * kept; local collections never trigger this. Returns the kids whose
+ * catalog row was removed (empty for local collections).
+ */
+export function deleteCollection(id: string): string[] {
+  const col = getCollection(id);
+  if (!col) return [];
+  const kids = db
+    .select({ kid: collectionSongs.kid })
+    .from(collectionSongs)
+    .where(eq(collectionSongs.collectionId, id))
+    .all()
+    .map((r) => r.kid);
   db.delete(collections).where(eq(collections.id, id)).run();
+  if (col.source !== "imported") return [];
+  return deleteOrphanUndownloadedSongs(kids);
 }
 
 /** Find a collection by its remote plaid (the source kara.moe playlist id). */

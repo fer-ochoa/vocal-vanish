@@ -885,9 +885,12 @@ function registerIpc(): void {
     },
   );
 
+  // Deleting an imported collection also drops catalog rows for its
+  // undownloaded songs that belong to no other collection; the removed kids
+  // are returned so the renderer can report them.
   ipcMain.handle("kara:collection-delete", async (_e, id: string) => {
-    deleteCollection(id);
-    return true;
+    const deletedSongs = deleteCollection(id);
+    return { deletedSongs };
   });
 
   ipcMain.handle(

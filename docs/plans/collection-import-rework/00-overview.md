@@ -22,7 +22,8 @@ Every feat leaves the app fully working and shippable. No feat is half-done acro
    └─ 02-imported-collections    (collections model + migration + queries + IPC)
          ├─ 03-import-ui         (Import buttons, Imported tab)
          │     └─ 04-imported-detail-view  (per-song + bulk download, Sync)
-         └─ 05-catalog-not-downloaded      (Catalog shows metadata-only rows)
+         ├─ 05-catalog-not-downloaded      (Catalog shows metadata-only rows)
+         └─ 07-delete-orphan-undownloaded-songs  (orphan GC on imported-collection delete)
 06-update-architecture-docs      (docs only, last)
 ```
 
@@ -45,3 +46,4 @@ Every feat leaves the app fully working and shippable. No feat is half-done acro
 | 04 | `04-imported-detail-view.md` | Imported collection detail: per-song download, download-all, Sync | New: can download from an import |
 | 05 | `05-catalog-not-downloaded.md` | Catalog renders metadata-only rows with a "Not Downloaded" tag | New: imported songs appear in Catalog |
 | 06 | `06-update-architecture-docs.md` | `docs/implementation.md` + design doc §1/§3 | Docs only |
+| 07 | `07-delete-orphan-undownloaded-songs.md` | orphan GC on imported-collection delete | New: deleting an import cleans up its undownloaded songs |
